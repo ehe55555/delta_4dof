@@ -2,7 +2,14 @@
 set -eo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-DESKTOP_FILE="${HOME}/Desktop/Delta_4DOF_Control.desktop"
+
+if command -v xdg-user-dir >/dev/null 2>&1; then
+  DESKTOP_DIR="$(xdg-user-dir DESKTOP)"
+else
+  DESKTOP_DIR="${HOME}/Desktop"
+fi
+
+DESKTOP_FILE="${DESKTOP_DIR}/Delta_4DOF_Control.desktop"
 
 pause_window() {
   echo
@@ -13,6 +20,7 @@ echo "========================================"
 echo "       DELTA 4DOF FIRST-RUN SETUP"
 echo "========================================"
 echo "Workspace: ${ROOT_DIR}"
+echo "Desktop shortcut: ${DESKTOP_FILE}"
 echo
 
 cd "${ROOT_DIR}"
@@ -67,6 +75,7 @@ echo
 echo "[INFO] Cap quyen chay cho script..."
 chmod +x "${ROOT_DIR}/run_delta_control.sh"
 chmod +x "${ROOT_DIR}/run_gazebo.sh" 2>/dev/null || true
+chmod +x "${ROOT_DIR}/RUN_DELTA_4DOF.sh"
 
 NEED_BUILD=0
 
@@ -89,7 +98,8 @@ fi
 
 echo
 echo "[INFO] Tao shortcut ngoai Desktop..."
-mkdir -p "${HOME}/Desktop"
+
+mkdir -p "${DESKTOP_DIR}"
 
 cat > "${DESKTOP_FILE}" <<DESKTOP_EOF
 [Desktop Entry]
@@ -109,10 +119,6 @@ gio set "${DESKTOP_FILE}" metadata::trusted true 2>/dev/null || true
 
 echo "[OK] Da tao shortcut:"
 echo "     ${DESKTOP_FILE}"
-
-echo
-echo "[INFO] Source workspace..."
-source "${ROOT_DIR}/install/setup.bash"
 
 echo
 echo "[INFO] Dang mo chuong trinh Delta 4DOF..."
