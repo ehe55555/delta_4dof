@@ -4,7 +4,6 @@ import csv
 import math
 import queue
 import threading
-import numpy as np
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
@@ -304,7 +303,7 @@ class DeltaControlApp:
         ttk.Spinbox(
             workspace_settings,
             from_=5,
-            to=100000000000000000000,
+            to=24,
             increment=1,
             textvariable=self.workspace_divisions,
             width=7,
@@ -619,110 +618,6 @@ class DeltaControlApp:
         self.status.set("Tinh workspace that bai")
         messagebox.showerror("Khong ve duoc workspace", error)
 
-    def _build_contour_scan_path(self, mesh):
-        """
-        Tao duong quet bao ngoai workspace.
-        Dung mesh.x/y/z la cac diem bien workspace, don vi mm.
-        Tra ve contour_scan_path don vi m de dua vao _execute_workspace_scan().
-        """
-
-        surface_mm = np.column_stack(
-            (
-                np.asarray(mesh.x, dtype=float),
-                np.asarray(mesh.y, dtype=float),
-                np.asarray(mesh.z, dtype=float),
-            )
-        )
-
-        # Bo diem NaN/inf
-        finite_mask = np.isfinite(surface_mm).all(axis=1)
-        surface_mm = surface_mm[finite_mask]
-
-        if len(surface_mm) == 0:
-            raise ValueError("Khong co diem bien workspace de quet bao ngoai.")
-
-        # Loc IK lai de bo diem bien bi vuot ngoai workspace that
-        valid_points = []
-        for point_mm in surface_mm:
-            x = float(point_mm[0]) / 1000.0
-            y = float(point_mm[1]) / 1000.0
-            z = float(point_mm[2]) / 1000.0
-
-            try:
-                self.solver.inverse_kinematics(x, y, z)
-                valid_points.append(point_mm)
-            except (ValueError, DeltaIKError):
-                pass
-
-        surface_mm = np.asarray(valid_points, dtype=float)
-
-        if len(surface_mm) < 3:
-            raise ValueError("Diem bien hop le qua it, khong tao duoc duong bao ngoai.")
-
-        grid_step = float(getattr(mesh, "grid_step_mm", 5.0))
-        if grid_step <= 0.0:
-            grid_step = 5.0
-
-        # Gom diem theo tung lop Z
-        iz = np.round(surface_mm[:, 2] / grid_step).astype(int)
-        z_keys = sorted(set(iz.tolist()))
-
-        ordered_points = []
-        reverse_layer = False
-
-        for z_key in z_keys:
-            layer = surface_mm[iz == z_key]
-
-            if len(layer) < 3:
-                continue
-
-            cx = float(np.mean(layer[:, 0]))
-            cy = float(np.mean(layer[:, 1]))
-
-            # Sap xep theo goc quanh tam lop Z de tao vong bao ngoai
-            angles = np.arctan2(layer[:, 1] - cy, layer[:, 0] - cx)
-            order = np.argsort(angles)
-            layer_path = layer[order]
-
-            if reverse_layer:
-                layer_path = layer_path[::-1]
-
-            # Cho diem dau cua lop moi gan diem cuoi lop truoc nhat
-            if ordered_points:
-                previous = np.asarray(ordered_points[-1], dtype=float)
-                distances = np.linalg.norm(layer_path - previous, axis=1)
-                start_index = int(np.argmin(distances))
-                layer_path = np.vstack(
-                    (
-                        layer_path[start_index:],
-                        layer_path[:start_index],
-                    )
-                )
-
-            # Dong vong tung lop
-            layer_path = np.vstack((layer_path, layer_path[0]))
-
-            ordered_points.extend(layer_path.tolist())
-            reverse_layer = not reverse_layer
-
-        if not ordered_points:
-            raise ValueError("Khong tao duoc duong contour tu diem bien workspace.")
-
-        contour_scan_path = np.asarray(ordered_points, dtype=float) / 1000.0
-
-        home = np.array(
-            [
-                self.solver.g.home_x,
-                self.solver.g.home_y,
-                self.solver.g.home_z,
-            ],
-            dtype=float,
-        )
-
-        # Them HOME dau/cuoi
-        contour_scan_path = np.vstack((home, contour_scan_path, home))
-
-        return contour_scan_path, surface_mm
     def _show_workspace(self, mesh):
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         from matplotlib.figure import Figure
@@ -745,29 +640,26 @@ class DeltaControlApp:
             depthshade=False,
             label="The tich workspace",
         )
-        contour_scan_path, surface_mm = self._build_contour_scan_path(mesh)
-
         points = axis.scatter(
-            surface_mm[:, 0],
-            surface_mm[:, 1],
-            surface_mm[:, 2],
-            c=surface_mm[:, 2],
+            mesh.x,
+            mesh.y,
+            mesh.z,
+            c=mesh.z,
             cmap="viridis",
             s=2.5,
             alpha=0.34,
             linewidths=0,
             depthshade=False,
-            label="Bien workspace da loc IK",
+            label="Bien workspace",
         )
-
-        path_mm = contour_scan_path * 1000.0
+        path_mm = mesh.scan_path * 1000.0
         axis.plot(
             path_mm[:, 0],
             path_mm[:, 1],
             path_mm[:, 2],
             color="#d62728",
-            linewidth=1.2,
-            label="Quy dao bao ngoai",
+            linewidth=1.4,
+            label="Quy dao Gazebo",
         )
         axis.scatter(
             [self.solver.g.home_x * 1000.0],
@@ -808,7 +700,7 @@ class DeltaControlApp:
         canvas.get_tk_widget().pack(fill="both", expand=True)
 
         try:
-            duration = self._execute_workspace_scan(contour_scan_path)
+            duration = self._execute_workspace_scan(mesh.scan_path)
         except (ValueError, DeltaIKError) as error:
             self._workspace_failed(str(error))
             return
@@ -852,7 +744,7 @@ class DeltaControlApp:
         time_value = samples[-1]["t"]
         previous_p = home
         previous_q = samples[-1]["q"]
-        speed = 0.02
+        speed = 0.06
         max_spacing = 0.002
 
         for endpoint in scan_path[1:]:
