@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-
+import bisect
 import csv
 import math
 import queue
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
@@ -32,6 +33,8 @@ class DeltaControlNode(Node):
         )
         self.feedback_xyz = None
         self.feedback_theta = None
+        self.feedback_xyz_speed = 0.0
+        self.feedback_theta_speed = (0.0, 0.0, 0.0)
         self.create_subscription(
             Float64MultiArray,
             "/delta_robot/feedback_xyz",
@@ -47,11 +50,36 @@ class DeltaControlNode(Node):
 
     def _on_xyz(self, msg):
         if len(msg.data) >= 3 and all(math.isfinite(v) for v in msg.data[:3]):
-            self.feedback_xyz = tuple(float(v) for v in msg.data[:3])
+            now = time.perf_counter()
+            xyz = tuple(float(v) for v in msg.data[:3])
+
+            if self.feedback_xyz is not None and self.feedback_xyz_time is not None:
+                dt = now - self.feedback_xyz_time
+                if dt > 1e-9:
+                    self.feedback_xyz_speed = math.dist(self.feedback_xyz, xyz) / dt
+
+            self.feedback_xyz = xyz
+            self.feedback_xyz_time = now
 
     def _on_theta(self, msg):
         if len(msg.data) >= 3 and all(math.isfinite(v) for v in msg.data[:3]):
-            self.feedback_theta = tuple(float(v) for v in msg.data[:3])
+            now = time.perf_counter()
+            theta = tuple(float(v) for v in msg.data[:3])
+
+            if self.feedback_theta is not None and self.feedback_theta_time is not None:
+                dt = now - self.feedback_theta_time
+                if dt > 1e-9:
+                    self.feedback_theta_speed = tuple(
+                        math.atan2(
+                            math.sin(theta[i] - self.feedback_theta[i]),
+                            math.cos(theta[i] - self.feedback_theta[i]),
+                        )
+                        / dt
+                        for i in range(3)
+                    )
+
+            self.feedback_theta = theta
+            self.feedback_theta_time = now
 
     def publish_trajectory(self, samples, trajectory_id):
         data = [float(trajectory_id), float(len(samples))]
@@ -81,6 +109,11 @@ class DeltaControlApp:
         self.solver = DeltaKinematics2()
         self.trajectory_id = 0
         self.last_samples = []
+        self.sample_row_ids = []
+        self.monitor_after_id = None
+        self.monitor_start_time = None
+        self.monitor_samples = []
+        self.monitor_sample_times = []
         self.jog_after_id = None
         self.jog_delay_id = None
         self.held_jog_direction = None
@@ -171,28 +204,92 @@ class DeltaControlApp:
         )
         table_frame.pack(fill="both", expand=True)
 
-        columns = ("i", "t", "x", "y", "z", "q1", "q2", "q3")
+        columns = (
+            "i",
+            "t",
+            "x_ref",
+            "x_act",
+            "y_ref",
+            "y_act",
+            "z_ref",
+            "z_act",
+            "v_ref",
+            "v_act",
+            "q1_ref",
+            "q1_act",
+            "q2_ref",
+            "q2_act",
+            "q3_ref",
+            "q3_act",
+            "qd_ref",
+            "qd_act",
+            "e_xyz",
+            "e_q",
+        )
+
         self.table = ttk.Treeview(table_frame, columns=columns, show="headings", height=13)
+
         labels = {
             "i": "#",
-            "t": "t (s)",
-            "x": "X (mm)",
-            "y": "Y (mm)",
-            "z": "Z (mm)",
-            "q1": "q1 (deg)",
-            "q2": "q2 (deg)",
-            "q3": "q3 (deg)",
+            "t": "t",
+            "x_ref": "X ref",
+            "x_act": "X act",
+            "y_ref": "Y ref",
+            "y_act": "Y act",
+            "z_ref": "Z ref",
+            "z_act": "Z act",
+            "v_ref": "v ref",
+            "v_act": "v act",
+            "q1_ref": "q1 ref",
+            "q1_act": "q1 act",
+            "q2_ref": "q2 ref",
+            "q2_act": "q2 act",
+            "q3_ref": "q3 ref",
+            "q3_act": "q3 act",
+            "qd_ref": "qd ref",
+            "qd_act": "qd act",
+            "e_xyz": "e XYZ",
+            "e_q": "e q",
         }
-        widths = {"i": 45, "t": 75, "x": 90, "y": 90, "z": 90, "q1": 90, "q2": 90, "q3": 90}
+
+        widths = {
+            "i": 45,
+            "t": 65,
+            "x_ref": 75,
+            "x_act": 75,
+            "y_ref": 75,
+            "y_act": 75,
+            "z_ref": 75,
+            "z_act": 75,
+            "v_ref": 70,
+            "v_act": 70,
+            "q1_ref": 75,
+            "q1_act": 75,
+            "q2_ref": 75,
+            "q2_act": 75,
+            "q3_ref": 75,
+            "q3_act": 75,
+            "qd_ref": 70,
+            "qd_act": 70,
+            "e_xyz": 70,
+            "e_q": 70,
+        }
+
         for column in columns:
             self.table.heading(column, text=labels[column])
-            self.table.column(column, width=widths[column], anchor="center", stretch=True)
+            self.table.column(column, width=widths[column], anchor="center", stretch=False)
 
-        scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview)
-        self.table.configure(yscrollcommand=scroll.set)
+        scroll_y = ttk.Scrollbar(table_frame, orient="vertical", command=self.table.yview)
+        scroll_x = ttk.Scrollbar(table_frame, orient="horizontal", command=self.table.xview)
+
+        self.table.configure(
+            yscrollcommand=scroll_y.set,
+            xscrollcommand=scroll_x.set,
+        )
+
+        scroll_y.pack(side="right", fill="y")
+        scroll_x.pack(side="bottom", fill="x")
         self.table.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
-
     def _build_jog_panel(self, parent):
         settings = ttk.Frame(parent)
         settings.pack(fill="x", pady=(0, 10))
@@ -379,26 +476,182 @@ class DeltaControlApp:
         )
         return samples
 
+    def _format_sample_row(
+        self,
+        sample,
+        actual_xyz=None,
+        actual_theta=None,
+        actual_v_xyz=None,
+        actual_q_dot=None,
+    ):
+        p_ref = sample["p"]
+        q_ref = sample["q"]
+        q_ref_deg = [math.degrees(value) for value in q_ref]
+
+        p_dot_ref = sample.get("p_dot", (0.0, 0.0, 0.0))
+        q_dot_ref = sample.get("q_dot", (0.0, 0.0, 0.0))
+
+        v_ref = math.sqrt(sum(value * value for value in p_dot_ref)) * 1000.0
+        qd_ref = max(abs(math.degrees(value)) for value in q_dot_ref)
+
+        if actual_xyz is None:
+            actual_xyz = sample.get("actual_xyz")
+
+        if actual_theta is None:
+            actual_theta = sample.get("actual_theta")
+
+        if actual_v_xyz is None:
+            actual_v_xyz = sample.get("actual_v_xyz")
+
+        if actual_q_dot is None:
+            actual_q_dot = sample.get("actual_q_dot")
+
+        x_act = y_act = z_act = ""
+        q1_act = q2_act = q3_act = ""
+        v_act = ""
+        qd_act = ""
+        err_xyz = ""
+        err_q = ""
+
+        if actual_xyz is not None:
+            x_act = f"{actual_xyz[0] * 1000.0:.2f}"
+            y_act = f"{actual_xyz[1] * 1000.0:.2f}"
+            z_act = f"{actual_xyz[2] * 1000.0:.2f}"
+
+            err_xyz_value = math.sqrt(
+                sum((actual_xyz[i] - p_ref[i]) ** 2 for i in range(3))
+            ) * 1000.0
+            err_xyz = f"{err_xyz_value:.2f}"
+
+        if actual_theta is not None:
+            q_act_deg = [math.degrees(value) for value in actual_theta]
+            q1_act = f"{q_act_deg[0]:.2f}"
+            q2_act = f"{q_act_deg[1]:.2f}"
+            q3_act = f"{q_act_deg[2]:.2f}"
+
+            err_q_value = max(
+                abs(
+                    math.degrees(
+                        self.solver.normalize_angle(actual_theta[i] - q_ref[i])
+                    )
+                )
+                for i in range(3)
+            )
+            err_q = f"{err_q_value:.2f}"
+
+        if actual_v_xyz is not None:
+            v_act = f"{actual_v_xyz * 1000.0:.2f}"
+
+        if actual_q_dot is not None:
+            qd_act_value = max(abs(math.degrees(value)) for value in actual_q_dot)
+            qd_act = f"{qd_act_value:.2f}"
+
+        return (
+            sample["index"],
+            f"{sample['t']:.3f}",
+            f"{p_ref[0] * 1000.0:.2f}",
+            x_act,
+            f"{p_ref[1] * 1000.0:.2f}",
+            y_act,
+            f"{p_ref[2] * 1000.0:.2f}",
+            z_act,
+            f"{v_ref:.2f}",
+            v_act,
+            f"{q_ref_deg[0]:.2f}",
+            q1_act,
+            f"{q_ref_deg[1]:.2f}",
+            q2_act,
+            f"{q_ref_deg[2]:.2f}",
+            q3_act,
+            f"{qd_ref:.2f}",
+            qd_act,
+            err_xyz,
+            err_q,
+        )
+
     def _show_samples(self, samples):
         for item in self.table.get_children():
             self.table.delete(item)
+
+        self.sample_row_ids = []
+
         for sample in samples:
-            p = sample["p"]
-            q_deg = [math.degrees(value) for value in sample["q"]]
+            row_id = f"sample_{sample['index']}"
+            self.sample_row_ids.append(row_id)
+
             self.table.insert(
                 "",
                 "end",
-                values=(
-                    sample["index"],
-                    f"{sample['t']:.3f}",
-                    f"{p[0] * 1000.0:.2f}",
-                    f"{p[1] * 1000.0:.2f}",
-                    f"{p[2] * 1000.0:.2f}",
-                    f"{q_deg[0]:.2f}",
-                    f"{q_deg[1]:.2f}",
-                    f"{q_deg[2]:.2f}",
-                ),
+                iid=row_id,
+                values=self._format_sample_row(sample),
             )
+
+    def _start_execution_monitor(self, samples):
+        if self.monitor_after_id is not None:
+            self.root.after_cancel(self.monitor_after_id)
+            self.monitor_after_id = None
+
+        self.monitor_samples = list(samples)
+        self.monitor_sample_times = [float(sample["t"]) for sample in samples]
+        self.monitor_start_time = time.perf_counter()
+
+        self._monitor_execution_actual()
+
+    def _monitor_execution_actual(self):
+        if not self.monitor_samples or self.monitor_start_time is None:
+            return
+
+        elapsed = time.perf_counter() - self.monitor_start_time
+        index = bisect.bisect_left(self.monitor_sample_times, elapsed)
+
+        candidates = []
+        if 0 <= index < len(self.monitor_samples):
+            candidates.append(index)
+        if 0 <= index - 1 < len(self.monitor_samples):
+            candidates.append(index - 1)
+
+        if candidates:
+            nearest_index = min(
+                candidates,
+                key=lambda value: abs(self.monitor_sample_times[value] - elapsed),
+            )
+
+            sample = self.monitor_samples[nearest_index]
+            row_id = f"sample_{sample['index']}"
+
+            actual_xyz = self.node.feedback_xyz
+            actual_theta = self.node.feedback_theta
+            actual_v_xyz = self.node.feedback_xyz_speed
+            actual_q_dot = self.node.feedback_theta_speed
+
+            if actual_xyz is not None:
+                sample["actual_xyz"] = actual_xyz
+                sample["actual_v_xyz"] = actual_v_xyz
+
+            if actual_theta is not None:
+                sample["actual_theta"] = actual_theta
+                sample["actual_q_dot"] = actual_q_dot
+
+            if self.table.exists(row_id):
+                self.table.item(
+                    row_id,
+                    values=self._format_sample_row(
+                        sample,
+                        actual_xyz=actual_xyz,
+                        actual_theta=actual_theta,
+                        actual_v_xyz=actual_v_xyz,
+                        actual_q_dot=actual_q_dot,
+                    ),
+                )
+                self.table.see(row_id)
+
+        if elapsed <= self.monitor_sample_times[-1] + 1.0:
+            self.monitor_after_id = self.root.after(
+                100,
+                self._monitor_execution_actual,
+            )
+        else:
+            self.monitor_after_id = None
 
     def _plan_from_fields(self):
         try:
@@ -424,8 +677,8 @@ class DeltaControlApp:
     def _publish(self, samples):
         self.trajectory_id += 1
         self.node.publish_trajectory(samples, self.trajectory_id)
+        self._start_execution_monitor(samples)
         self.status.set(f"Da gui trajectory #{self.trajectory_id} den Gazebo")
-
     def _start_hold_jog(self, direction):
         self._cancel_hold_jog()
         self.held_jog_direction = direction
@@ -752,6 +1005,11 @@ class DeltaControlApp:
             distance = math.dist(previous_p, endpoint)
             segment_count = max(1, int(math.ceil(distance / max_spacing)))
             segment_time = max(distance / speed, 0.05)
+            segment_p_dot = tuple(
+                (endpoint[i] - previous_p[i]) / segment_time
+                for i in range(3)
+            )
+
             for step_index in range(1, segment_count + 1):
                 ratio = step_index / segment_count
                 p = tuple(
@@ -769,7 +1027,7 @@ class DeltaControlApp:
                         "t": time_value,
                         "tau": 0.0,
                         "p": p,
-                        "p_dot": (0.0, 0.0, 0.0),
+                        "p_dot": segment_p_dot,
                         "p_ddot": (0.0, 0.0, 0.0),
                         "q": q,
                         "q_dot": (0.0, 0.0, 0.0),
@@ -844,16 +1102,27 @@ class DeltaControlApp:
     def _refresh_feedback(self):
         xyz = self.node.feedback_xyz
         theta = self.node.feedback_theta
+
         if xyz is not None:
+            v_xyz = self.node.feedback_xyz_speed * 1000.0
+
             text = (
                 f"Feedback XYZ: {xyz[0] * 1000.0:.2f}, "
                 f"{xyz[1] * 1000.0:.2f}, {xyz[2] * 1000.0:.2f} mm"
+                f" | v: {v_xyz:.2f} mm/s"
             )
-            if theta is not None:
-                text += " | q: " + ", ".join(f"{math.degrees(v):.2f}" for v in theta) + " deg"
-            self.feedback.set(text)
-        self.root.after(100, self._refresh_feedback)
 
+            if theta is not None:
+                q_text = ", ".join(f"{math.degrees(v):.2f}" for v in theta)
+                qd_text = ", ".join(
+                    f"{math.degrees(v):.2f}"
+                    for v in self.node.feedback_theta_speed
+                )
+                text += f" | q: {q_text} deg | qd: {qd_text} deg/s"
+
+            self.feedback.set(text)
+
+        self.root.after(100, self._refresh_feedback)
 
 def main(args=None):
     rclpy.init(args=args)
