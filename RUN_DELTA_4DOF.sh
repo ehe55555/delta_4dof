@@ -1,45 +1,33 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-EXPECTED_DIR="${HOME}/delta_4dof"
+DESKTOP_FILE="${HOME}/Desktop/Delta_4DOF_Control.desktop"
 
-clear
+pause_window() {
+  echo
+  read -rp "Nhan Enter de dong cua so nay..."
+}
+
 echo "========================================"
-echo "       DELTA 4DOF AUTO LAUNCHER"
+echo "       DELTA 4DOF FIRST-RUN SETUP"
 echo "========================================"
-echo "Current folder: ${ROOT_DIR}"
+echo "Workspace: ${ROOT_DIR}"
 echo
-
-# Launch file hien tai dang mac dinh workspace o ~/delta_4dof.
-# Neu nguoi dung tai folder nay o noi khac, tu tao symlink ve ~/delta_4dof.
-if [ "${ROOT_DIR}" != "${EXPECTED_DIR}" ]; then
-  if [ ! -e "${EXPECTED_DIR}" ]; then
-    echo "[INFO] Tao lien ket ${EXPECTED_DIR} -> ${ROOT_DIR}"
-    ln -s "${ROOT_DIR}" "${EXPECTED_DIR}"
-    ROOT_DIR="${EXPECTED_DIR}"
-  elif [ "$(readlink -f "${EXPECTED_DIR}")" != "$(readlink -f "${ROOT_DIR}")" ]; then
-    echo "[ERROR] Thu muc ${EXPECTED_DIR} da ton tai va khong phai repo hien tai."
-    echo "Hay clone repo vao dung ~/delta_4dof hoac xoa/sua thu muc cu."
-    echo
-    read -rp "Nhan Enter de dong..."
-    exit 1
-  fi
-fi
 
 cd "${ROOT_DIR}"
 
 if [ ! -f /opt/ros/jazzy/setup.bash ]; then
   echo "[ERROR] Chua cai ROS 2 Jazzy."
   echo "Hay cai ROS 2 Jazzy truoc roi chay lai file nay."
-  echo
-  read -rp "Nhan Enter de dong..."
+  pause_window
   exit 1
 fi
 
+echo "[INFO] Source ROS 2 Jazzy..."
 source /opt/ros/jazzy/setup.bash
 
-echo "[INFO] Kiem tra cac goi can thiet..."
+echo "[INFO] Kiem tra cac package can thiet..."
 
 MISSING_PKGS=()
 
@@ -65,26 +53,24 @@ check_pkg libgz-msgs10-dev
 
 if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
   echo
-  echo "[INFO] May dang thieu cac goi:"
+  echo "[INFO] May dang thieu cac goi sau:"
   printf '  - %s\n' "${MISSING_PKGS[@]}"
   echo
-  echo "[INFO] Se cai cac goi con thieu. Co the can nhap mat khau sudo."
+  echo "[INFO] Se cai bang apt. Co the can nhap mat khau sudo."
   sudo apt update
   sudo apt install -y "${MISSING_PKGS[@]}"
 else
-  echo "[OK] Da du goi can thiet."
+  echo "[OK] Da du package can thiet."
 fi
 
-chmod +x run_delta_control.sh 2>/dev/null || true
-chmod +x run_gazebo.sh 2>/dev/null || true
+echo
+echo "[INFO] Cap quyen chay cho script..."
+chmod +x "${ROOT_DIR}/run_delta_control.sh"
+chmod +x "${ROOT_DIR}/run_gazebo.sh" 2>/dev/null || true
 
 NEED_BUILD=0
 
-if [ ! -f install/setup.bash ]; then
-  NEED_BUILD=1
-fi
-
-if [ ! -f install/gz_delta_controller2/lib/gz_delta_controller2/libgz_delta_controller2.so ]; then
+if [ ! -f "${ROOT_DIR}/install/setup.bash" ]; then
   NEED_BUILD=1
 fi
 
@@ -97,14 +83,43 @@ if [ "${NEED_BUILD}" -eq 1 ]; then
   echo "[INFO] Dang build workspace..."
   colcon build --symlink-install
 else
-  echo "[OK] Workspace da build san."
+  echo
+  echo "[OK] Workspace da build san, bo qua buoc build."
 fi
 
-source install/setup.bash
+echo
+echo "[INFO] Tao shortcut ngoai Desktop..."
+mkdir -p "${HOME}/Desktop"
+
+cat > "${DESKTOP_FILE}" <<DESKTOP_EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Delta 4DOF Control
+Comment=Run Delta 4DOF Gazebo simulation and control GUI
+Path=${ROOT_DIR}
+Exec=gnome-terminal -- bash -lc "cd '${ROOT_DIR}' && ./run_delta_control.sh; echo; read -rp 'Nhan Enter de dong...'"
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;Robotics;
+DESKTOP_EOF
+
+chmod +x "${DESKTOP_FILE}"
+gio set "${DESKTOP_FILE}" metadata::trusted true 2>/dev/null || true
+
+echo "[OK] Da tao shortcut:"
+echo "     ${DESKTOP_FILE}"
 
 echo
-echo "[INFO] Dang chay Delta 4DOF..."
-echo "[INFO] Se mo Gazebo + bridge + feedback + GUI."
+echo "[INFO] Source workspace..."
+source "${ROOT_DIR}/install/setup.bash"
+
+echo
+echo "[INFO] Dang mo chuong trinh Delta 4DOF..."
 echo
 
-exec ros2 launch delta_control delta_control.launch.py
+"${ROOT_DIR}/run_delta_control.sh"
+
+echo
+echo "[INFO] Chuong trinh da ket thuc."
+pause_window

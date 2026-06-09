@@ -1,169 +1,71 @@
-# Delta 4DOF Workspace Setup
+# Delta 4DOF
 
-README này hướng dẫn tải workspace `delta_4dof`, build ROS 2 workspace và tạo shortcut chạy mô phỏng/GUI trên Ubuntu.
+## Cách mở chương trình
 
-## 1. Tải workspace từ GitHub
+Project này dùng ROS 2 Jazzy và Gazebo để chạy mô phỏng robot Delta 4DOF.
 
-```bash
-cd ~
-git clone https://github.com/ehe55555/delta_4dof.git
-cd ~/delta_4dof
-```
+---
 
-Nếu đã tải workspace trước đó và chỉ muốn cập nhật bản mới:
+## Lần đầu tiên sau khi tải project về
 
-```bash
-cd ~/delta_4dof
-git pull
-```
+Sau khi tải project từ GitHub về, mở thư mục:
 
-## 2. Cài các gói cần thiết
+delta_4dof
 
-```bash
-sudo apt update
-sudo apt install -y \
-  git \
-  python3-colcon-common-extensions \
-  python3-tk \
-  python3-numpy \
-  python3-scipy \
-  python3-matplotlib \
-  ros-jazzy-ros-gz \
-  ros-jazzy-ros-gz-sim \
-  ros-jazzy-ros-gz-bridge \
-  gz-harmonic \
-  libgz-sim8-dev \
-  libgz-plugin2-dev \
-  libgz-transport13-dev \
-  libgz-msgs10-dev
-```
+Sau đó bấm file:
 
-## 3. Build workspace
+RUN_DELTA_4DOF.sh
 
-```bash
-cd ~/delta_4dof
-source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install
-source install/setup.bash
-```
+Chọn:
 
-Nếu cần build lại từ đầu:
+Run as a Program
 
-```bash
-cd ~/delta_4dof
-rm -rf build install log
-source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install
-source install/setup.bash
-```
+File RUN_DELTA_4DOF.sh sẽ tự động:
 
-## 4. Cấp quyền chạy script
+1. Kiểm tra các package cần thiết
+2. Build workspace nếu chưa build
+3. Tạo shortcut ngoài Desktop
+4. Mở chương trình Delta 4DOF
 
-```bash
-cd ~/delta_4dof
-chmod +x run_gazebo.sh
-chmod +x run_delta_control.sh
-```
+---
 
-## 5. Chạy workspace
+## Các lần sau
 
-Chạy mô phỏng Gazebo + bridge + GUI điều khiển:
+Sau lần chạy đầu tiên, chương trình sẽ tạo shortcut ngoài Desktop tên là:
 
-```bash
-cd ~/delta_4dof
-./run_delta_control.sh
-```
+Delta 4DOF Control
 
-Chỉ chạy Gazebo để kiểm tra model:
+Từ lần thứ hai trở đi, chỉ cần bấm shortcut này trên Desktop để mở chương trình.
 
-```bash
-cd ~/delta_4dof
-./run_gazebo.sh
-```
+Shortcut này sẽ gọi file:
 
-## 6. Tạo shortcut mở Delta Control
+run_delta_control.sh
 
-Tạo file shortcut ngoài Desktop:
+để chạy:
 
-```bash
-cat > ~/Desktop/Delta_4DOF_Control.desktop <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=Delta 4DOF Control
-Comment=Run Delta 4DOF Gazebo simulation and control GUI
-Exec=bash -lc "cd ~/delta_4dof && ./run_delta_control.sh"
-Icon=utilities-terminal
-Terminal=true
-Categories=Development;Robotics;
-EOF
+Gazebo + bridge + feedback + giao diện điều khiển
 
-chmod +x ~/Desktop/Delta_4DOF_Control.desktop
-gio set ~/Desktop/Delta_4DOF_Control.desktop metadata::trusted true 2>/dev/null || true
-```
+---
 
-Sau đó ra Desktop, nếu Ubuntu hỏi quyền chạy thì chọn:
+## Nếu không bấm được bằng chuột
 
-```text
-Allow Launching
-```
+Mở terminal trong thư mục delta_4dof, sau đó chạy:
 
-## 7. Tạo shortcut chỉ mở Gazebo
+chmod +x RUN_DELTA_4DOF.sh
+./RUN_DELTA_4DOF.sh
 
-```bash
-cat > ~/Desktop/Delta_4DOF_Gazebo.desktop <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=Delta 4DOF Gazebo
-Comment=Run Delta 4DOF Gazebo world only
-Exec=bash -lc "cd ~/delta_4dof && ./run_gazebo.sh"
-Icon=utilities-terminal
-Terminal=true
-Categories=Development;Robotics;
-EOF
+Nếu muốn build lại workspace từ đầu:
 
-chmod +x ~/Desktop/Delta_4DOF_Gazebo.desktop
-gio set ~/Desktop/Delta_4DOF_Gazebo.desktop metadata::trusted true 2>/dev/null || true
-```
+./RUN_DELTA_4DOF.sh --rebuild
 
-## 8. Cập nhật code lên GitHub
+---
 
-Sau khi sửa code:
+## Tóm tắt
 
-```bash
-cd ~/delta_4dof
-git status
-git add .
-git commit -m "Update workspace"
-git push
-```
+Lần đầu:
 
-## 9. Lỗi thường gặp
+RUN_DELTA_4DOF.sh trong thư mục delta_4dof
 
-Nếu chạy không thấy package:
+Các lần sau:
 
-```bash
-cd ~/delta_4dof
-source /opt/ros/jazzy/setup.bash
-source install/setup.bash
-ros2 pkg list | grep delta
-```
-
-Nếu sửa code Python nhưng chạy chưa cập nhật:
-
-```bash
-cd ~/delta_4dof
-colcon build --symlink-install --packages-select delta_control
-source install/setup.bash
-./run_delta_control.sh
-```
-
-Nếu Gazebo không load plugin:
-
-```bash
-cd ~/delta_4dof
-rm -rf build install log
-source /opt/ros/jazzy/setup.bash
-colcon build --symlink-install
-source install/setup.bash
-./run_delta_control.sh
-```
+Delta 4DOF Control ngoài Desktop
