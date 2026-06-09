@@ -1,0 +1,30 @@
+# ROS2 colcon generated folders
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# C/C++ generated files
+*.o
+*.so
+*.a
+*.out
+
+# Gazebo / logs
+*.log
+*.csv
+
+# VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# System
+.DS_Store
+Thumbs.db
