@@ -161,7 +161,33 @@ void DeltaMotorController2::Configure(
   }
   this->motor4_input_joint_entity_ =
     this->model_.JointByName(_ecm, "joint_4");
+  this->motor4_output_joint_entity_ =
+    this->model_.JointByName(
+      _ecm,
+      "joint_end_411111");
 
+  if (this->motor4_output_joint_entity_ == kNullEntity)
+  {
+    gzerr << "Cannot find motor 4 output joint "
+          << "[joint_end_411111].\n";
+    return;
+  }
+
+  if (_ecm.Component<components::JointPosition>(
+        this->motor4_output_joint_entity_) == nullptr)
+  {
+    _ecm.CreateComponent(
+      this->motor4_output_joint_entity_,
+      components::JointPosition({0.0}));
+  }
+
+  if (_ecm.Component<components::JointVelocity>(
+        this->motor4_output_joint_entity_) == nullptr)
+  {
+    _ecm.CreateComponent(
+      this->motor4_output_joint_entity_,
+      components::JointVelocity({0.0}));
+  }
   for (std::size_t i = 0; i < this->twist_child_entities_.size(); ++i)
   {
     this->twist_parent_entities_[i] =
@@ -333,7 +359,7 @@ void DeltaMotorController2::PreUpdate(
   {
     // Let the physics backend establish the closed-loop joint coordinates
     // before capturing the relative HOME position of the fourth output.
-    if (sim_time < 0.1)
+    if (sim_time < 2.0)
       return;
 
     std::lock_guard<std::mutex> lock(this->mutex_);
@@ -356,13 +382,12 @@ void DeltaMotorController2::PreUpdate(
     if (!all_ready)
       return;
 
-    double motor4_angle = 0.0;
-    double motor4_angular_velocity = 0.0;
+    auto motor4_output_pos =
+      _ecm.Component<components::JointPosition>(
+        this->motor4_output_joint_entity_);
 
-    if (!this->MeasureMotor4Orientation(
-          _ecm,
-          motor4_angle,
-          motor4_angular_velocity))
+    if (!motor4_output_pos ||
+        motor4_output_pos->Data().empty())
     {
       return;
     }
@@ -377,13 +402,14 @@ void DeltaMotorController2::PreUpdate(
 
       if (i == 3)
       {
-        // Khi controller vừa chạy, giữ nguyên hướng tuyệt đối hiện tại
-        // của 411111 so với base_link.
-        this->targets_[i] = motor4_angle;
+        // Giữ góc quay tương đối hiện tại của 411111 so với end.
+        this->targets_[i] =
+          motor4_output_pos->Data()[0];
       }
       else
       {
-        this->targets_[i] = pos_comp->Data()[0];
+        this->targets_[i] =
+          pos_comp->Data()[0];
       }
 
       this->velocity_targets_[i] = 0.0;
@@ -497,15 +523,29 @@ void DeltaMotorController2::PreUpdate(
 
     if (i == 3)
     {
-      // Motor 4 không dùng trực tiếp tọa độ joint làm hướng.
-      // Đo hướng của chính link 411111 trong hệ base_link.
-      if (!this->MeasureMotor4Orientation(
-            _ecm,
-            theta_current,
-            omega_current))
+      auto output_pos_comp =
+        _ecm.Component<components::JointPosition>(
+          this->motor4_output_joint_entity_);
+
+      auto output_vel_comp =
+        _ecm.Component<components::JointVelocity>(
+          this->motor4_output_joint_entity_);
+
+      if (!output_pos_comp ||
+          !output_vel_comp ||
+          output_pos_comp->Data().empty() ||
+          output_vel_comp->Data().empty())
       {
         continue;
       }
+
+      // Feedback PID đúng là vị trí và vận tốc
+      // của joint_end_411111.
+      theta_current =
+        output_pos_comp->Data()[0];
+
+      omega_current =
+        output_vel_comp->Data()[0];
     }
 
     const double theta_target = targets_copy[i];
@@ -639,14 +679,28 @@ void DeltaMotorController2::PreUpdate(
 
       if (i == 3)
       {
-        if (!this->MeasureMotor4Orientation(
-              _ecm,
-              reported_position,
-              reported_velocity))
+        auto output_pos_comp =
+          _ecm.Component<components::JointPosition>(
+            this->motor4_output_joint_entity_);
+
+        auto output_vel_comp =
+          _ecm.Component<components::JointVelocity>(
+            this->motor4_output_joint_entity_);
+
+        if (!output_pos_comp ||
+            !output_vel_comp ||
+            output_pos_comp->Data().empty() ||
+            output_vel_comp->Data().empty())
         {
           joints_ready = false;
           continue;
         }
+
+        reported_position =
+          output_pos_comp->Data()[0];
+
+        reported_velocity =
+          output_vel_comp->Data()[0];
       }
 
       theta_msg.set_data(reported_position);

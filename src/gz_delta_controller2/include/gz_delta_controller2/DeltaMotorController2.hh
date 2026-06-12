@@ -107,7 +107,15 @@ private:
 
   gz::sim::Entity base_entity_{gz::sim::kNullEntity};
   gz::sim::Entity endlink_entity_{gz::sim::kNullEntity};
-  gz::sim::Entity motor4_input_joint_entity_{gz::sim::kNullEntity};
+
+  gz::sim::Entity motor4_input_joint_entity_{
+    gz::sim::kNullEntity
+  };
+
+  gz::sim::Entity motor4_output_joint_entity_{
+    gz::sim::kNullEntity
+  };
+
   gz::sim::Entity motor4_output_link_entity_{
     gz::sim::kNullEntity
   };
