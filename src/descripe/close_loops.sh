@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 topics=(
   close_loop_121
@@ -11,10 +11,31 @@ topics=(
 )
 
 for t in "${topics[@]}"; do
-  echo "Attach $t"
+  full_topic="/model/descripe/${t}"
+
+  echo "[WAIT] ${full_topic}"
+
+  found=0
+  for _ in $(seq 1 150); do
+    if gz topic -l | grep -Fxq "${full_topic}"; then
+      found=1
+      break
+    fi
+
+    sleep 0.1
+  done
+
+  if [[ "${found}" -ne 1 ]]; then
+    echo "[ERROR] Không tìm thấy topic: ${full_topic}" >&2
+    exit 1
+  fi
+
+  echo "[ATTACH] ${full_topic}"
 
   gz topic \
-    -t "/model/descripe/${t}" \
+    -t "${full_topic}" \
     -m gz.msgs.Empty \
     -p ''
 done
+
+echo "[OK] Đã đóng toàn bộ vòng động học."

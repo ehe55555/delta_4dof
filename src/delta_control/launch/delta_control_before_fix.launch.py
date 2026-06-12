@@ -3,20 +3,17 @@
 import os
 
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, SetEnvironmentVariable, TimerAction
+from launch.actions import ExecuteProcess, SetEnvironmentVariable
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
     workspace = os.environ.get("DELTA_4DOF_ROOT")
-
     if not workspace:
         raise RuntimeError(
             "DELTA_4DOF_ROOT is not set. Start with run_delta_control.sh."
         )
-
     workspace = os.path.abspath(workspace)
-
     world = os.path.join(
         workspace,
         "src",
@@ -24,19 +21,10 @@ def generate_launch_description():
         "worlds",
         "descripe_test.world",
     )
-
-    close_loops = os.path.join(
-        workspace,
-        "src",
-        "descripe",
-        "close_loops.sh",
-    )
-
     model_paths = [
         os.path.join(workspace, "src", "descripe", "models"),
         os.path.join(workspace, "src"),
     ]
-
     controller_path = os.path.join(
         workspace,
         "install",
@@ -45,26 +33,13 @@ def generate_launch_description():
         "gz_delta_controller2",
     )
 
-    old_plugin_path = os.environ.get(
-        "GZ_SIM_SYSTEM_PLUGIN_PATH",
-        "",
-    )
-
+    old_plugin_path = os.environ.get("GZ_SIM_SYSTEM_PLUGIN_PATH", "")
     plugin_path = ":".join(
-        value
-        for value in (controller_path, old_plugin_path)
-        if value
+        value for value in (controller_path, old_plugin_path) if value
     )
-
-    old_resource_path = os.environ.get(
-        "GZ_SIM_RESOURCE_PATH",
-        "",
-    )
-
+    old_resource_path = os.environ.get("GZ_SIM_RESOURCE_PATH", "")
     resource_path = ":".join(
-        value
-        for value in (*model_paths, old_resource_path)
-        if value
+        value for value in (*model_paths, old_resource_path) if value
     )
 
     return LaunchDescription(
@@ -73,41 +48,24 @@ def generate_launch_description():
                 name="GZ_SIM_RESOURCE_PATH",
                 value=resource_path,
             ),
-
             SetEnvironmentVariable(
                 name="GZ_SIM_SYSTEM_PLUGIN_PATH",
                 value=plugin_path,
             ),
-
             ExecuteProcess(
                 cmd=["gz", "sim", "-v", "4", world],
                 output="screen",
             ),
-
-            # Chạy đóng vòng sau khi Gazebo bắt đầu load.
-            # Bản thân close_loops.sh tiếp tục chờ cho đến khi topic xuất hiện.
-            TimerAction(
-                period=1.0,
-                actions=[
-                    ExecuteProcess(
-                        cmd=["bash", close_loops],
-                        output="screen",
-                    )
-                ],
-            ),
-
             Node(
                 package="delta_bridge2",
                 executable="delta_bridge2_node",
                 output="screen",
             ),
-
             Node(
                 package="delta_bridge2",
                 executable="feedback_bridge_node",
                 output="screen",
             ),
-
             Node(
                 package="delta_control",
                 executable="delta_gui",

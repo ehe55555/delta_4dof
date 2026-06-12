@@ -1070,10 +1070,10 @@
       <attach_topic>close_loop_321</attach_topic>
     </plugin>
     <plugin filename="libgz-sim-detachable-joint-system.so" name="gz::sim::systems::DetachableJoint">
-      <parent_link>411111</parent_link>
+      <parent_link>end</parent_link>
       <child_model>descripe</child_model>
       <child_link>41111</child_link>
-      <attach_topic>close_loop_41111_to_411111</attach_topic>
+      <attach_topic>lose_loop_41111_to_411111</attach_topic>
     </plugin>
     <plugin filename="libgz_delta_controller2.so"
             name="gz::sim::systems::DeltaMotorController2">
