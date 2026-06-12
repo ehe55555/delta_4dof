@@ -95,7 +95,7 @@ private:
     "joint_1",
     "joint_2",
     "joint_3",
-    "joint_end_411111"
+    "joint_4"
   };
 
   std::array<gz::sim::Entity, 4> joint_entities_{
