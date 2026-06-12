@@ -568,12 +568,15 @@ void DeltaMotorController2::PreUpdate(
       -torque_limit,
       torque_limit);
 
-    force_comp->Data()[0] = torque_cmd;
+    const double applied_torque =
+      i == 3 ? -torque_cmd : torque_cmd;
+
+    force_comp->Data()[0] = applied_torque;
 
     // Count torque saturation on every PreUpdate step.
     const bool saturated =
       std::abs(torque_cmd) >= 0.98 * torque_limit;
-    this->last_torque_commands_[i] = torque_cmd;
+    this->last_torque_commands_[i] = applied_torque;
     this->last_saturated_[i] = saturated ? 1.0 : 0.0;
 
     if (saturated)
@@ -592,7 +595,7 @@ void DeltaMotorController2::PreUpdate(
       error_msg.set_data(position_error);
       omega_msg.set_data(omega_current);
       torque_raw_msg.set_data(torque_raw);
-      torque_cmd_msg.set_data(torque_cmd);
+      torque_cmd_msg.set_data(applied_torque);
       saturated_msg.set_data(saturated ? 1.0 : 0.0);
 
       this->error_debug_pubs_[i].Publish(error_msg);
