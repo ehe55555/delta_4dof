@@ -165,7 +165,11 @@ class DeltaControlApp:
         self.root = root
         self.node = node
         self.solver = DeltaKinematics2()
-        self.trajectory_id = 0
+        # Khởi tạo ID khác nhau mỗi lần GUI được mở lại.
+        self.trajectory_id = int(time.time_ns() % 2_000_000_000)
+
+        # Chỉ đồng bộ ô Rz với feedback một lần khi GUI bắt đầu.
+        self.rz_feedback_initialized = False
         self.last_samples = []
         self.sample_row_ids = []
         self.monitor_after_id = None
@@ -1587,6 +1591,16 @@ class DeltaControlApp:
             )
 
             if theta is not None:
+                if (
+                    len(theta) >= 4
+                    and not self.rz_feedback_initialized
+                ):
+                    # Ban đầu ô Rz phải bằng đúng hướng thực tế của 411111
+                    # so với base_link, không được mặc định ép về 0 độ.
+                    self.rz_deg.set(
+                        round(math.degrees(theta[3]), 3)
+                    )
+                    self.rz_feedback_initialized = True
                 q_text = ", ".join(f"{math.degrees(v):.2f}" for v in theta)
                 qd_text = ", ".join(
                     f"{math.degrees(v):.2f}"

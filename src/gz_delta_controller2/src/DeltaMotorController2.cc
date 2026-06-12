@@ -404,20 +404,8 @@ void DeltaMotorController2::PreUpdate(
       this->trajectory_sim_start_ = sim_time;
       this->current_trajectory_time_ = 0.0;
       this->trajectory_active_ = true;
-      this->trajectory_received_ = false;
-      this->last_segment_index_ = 0;
-
-      gzmsg << "Trajectory started at sim_time="
-            << this->trajectory_sim_start_ << "\n";
-    }
-
-    
-
-    if (this->trajectory_received_)
-    {
-      this->trajectory_sim_start_ = sim_time;
-      this->current_trajectory_time_ = 0.0;
-      this->trajectory_active_ = true;
+      // Không mang tích phân của trajectory cũ sang lệnh jog mới.
+      this->integrals_ = {0.0, 0.0, 0.0, 0.0};
       this->trajectory_received_ = false;
       this->last_segment_index_ = 0;
 
@@ -879,52 +867,66 @@ void DeltaMotorController2::OnTarget4(const gz::msgs::Double &_msg)
 void DeltaMotorController2::OnJointReference(
   const gz::msgs::Double_V &_msg)
 {
-  if (_msg.data_size() < 6)
+  const int size = _msg.data_size();
+
+  const bool is_3dof =
+    size == 6 || size == 9;
+
+  const bool is_4dof =
+    size == 8 || size == 12;
+
+  if (!is_3dof && !is_4dof)
   {
-    gzerr << "Joint reference rejected. Need at least "
-          << "[q1,q2,q3,qd1,qd2,qd3].\n";
+    gzerr
+      << "Joint reference rejected. Valid sizes are:\n"
+      << "  6  = q1..q3, qd1..qd3\n"
+      << "  8  = q1..q4, qd1..qd4\n"
+      << "  9  = q1..q3, qd1..qd3, qdd1..qdd3\n"
+      << "  12 = q1..q4, qd1..qd4, qdd1..qdd4\n"
+      << "Received size=" << size << "\n";
     return;
+  }
+
+  for (int i = 0; i < size; ++i)
+  {
+    if (!std::isfinite(_msg.data(i)))
+    {
+      gzerr << "Joint reference rejected: NaN or Inf.\n";
+      return;
+    }
   }
 
   std::lock_guard<std::mutex> lock(this->mutex_);
 
-  this->targets_[0] = _msg.data(0);
-  this->targets_[1] = _msg.data(1);
-  this->targets_[2] = _msg.data(2);
-
-  this->velocity_targets_[0] = _msg.data(3);
-  this->velocity_targets_[1] = _msg.data(4);
-  this->velocity_targets_[2] = _msg.data(5);
-
-  if (_msg.data_size() == 8 || _msg.data_size() >= 12)
+  if (is_3dof)
   {
-    this->targets_[3] = _msg.data(3);
-    this->velocity_targets_[0] = _msg.data(4);
-    this->velocity_targets_[1] = _msg.data(5);
-    this->velocity_targets_[2] = _msg.data(6);
-    this->velocity_targets_[3] = _msg.data(7);
-  }
+    for (std::size_t i = 0; i < 3; ++i)
+    {
+      this->targets_[i] = _msg.data(i);
+      this->velocity_targets_[i] = _msg.data(3 + i);
 
-  if (_msg.data_size() >= 12)
-  {
-    this->acceleration_targets_[0] = _msg.data(8);
-    this->acceleration_targets_[1] = _msg.data(9);
-    this->acceleration_targets_[2] = _msg.data(10);
-    this->acceleration_targets_[3] = _msg.data(11);
-  }
-  else if (_msg.data_size() == 9)
-  {
-    this->acceleration_targets_[0] = _msg.data(6);
-    this->acceleration_targets_[1] = _msg.data(7);
-    this->acceleration_targets_[2] = _msg.data(8);
+      this->acceleration_targets_[i] =
+        size == 9 ? _msg.data(6 + i) : 0.0;
+    }
+
+    // Giữ nguyên hướng q4 khi chỉ jog XYZ.
+    this->velocity_targets_[3] = 0.0;
     this->acceleration_targets_[3] = 0.0;
   }
   else
   {
-    this->acceleration_targets_ = {0.0, 0.0, 0.0, 0.0};
+    for (std::size_t i = 0; i < 4; ++i)
+    {
+      this->targets_[i] = _msg.data(i);
+      this->velocity_targets_[i] = _msg.data(4 + i);
+
+      this->acceleration_targets_[i] =
+        size == 12 ? _msg.data(8 + i) : 0.0;
+    }
   }
 
-  // Direct references are jog commands and override any running trajectory.
+  this->integrals_ = {0.0, 0.0, 0.0, 0.0};
+
   this->trajectory_received_ = false;
   this->trajectory_active_ = false;
   this->current_trajectory_time_ = 0.0;
@@ -1033,6 +1035,8 @@ void DeltaMotorController2::OnJointTrajectory(
   this->trajectory_duration_ = this->trajectory_.back().t;
   this->last_segment_index_ = 0;
   this->saturation_count_ = {0, 0, 0, 0};
+  this->integrals_ = {0.0, 0.0, 0.0, 0.0};
+  this->last_torque_commands_ = {0.0, 0.0, 0.0, 0.0};
 
   this->trajectory_received_ = true;
   this->trajectory_active_ = false;
