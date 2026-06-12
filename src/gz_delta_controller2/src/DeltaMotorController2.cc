@@ -127,7 +127,13 @@ void DeltaMotorController2::Configure(
 
   if (this->base_entity_ == kNullEntity)
   {
-    gzerr << "Cannot find link [base_link]. XYZ feedback will use world frame.\n";
+    gzerr << "Cannot find link [base_link].\n";
+    return;
+  }
+  else
+  {
+    // Cần vận tốc góc của base_link để tính vận tốc tương đối.
+    Link(this->base_entity_).EnableVelocityChecks(_ecm);
   }
 
   this->endlink_entity_ = this->model_.LinkByName(_ecm, "end");
@@ -140,7 +146,19 @@ void DeltaMotorController2::Configure(
   {
     Link(this->endlink_entity_).EnableVelocityChecks(_ecm);
   }
+  this->motor4_output_link_entity_ =
+    this->model_.LinkByName(_ecm, "411111");
 
+  if (this->motor4_output_link_entity_ == kNullEntity)
+  {
+    gzerr << "Cannot find motor 4 output link [411111].\n";
+    return;
+  }
+  else
+  {
+    Link(this->motor4_output_link_entity_)
+      .EnableVelocityChecks(_ecm);
+  }
   this->motor4_input_joint_entity_ =
     this->model_.JointByName(_ecm, "joint_4");
 
@@ -338,7 +356,20 @@ void DeltaMotorController2::PreUpdate(
     if (!all_ready)
       return;
 
-    for (std::size_t i = 0; i < this->joint_entities_.size(); ++i)
+    double motor4_angle = 0.0;
+    double motor4_angular_velocity = 0.0;
+
+    if (!this->MeasureMotor4Orientation(
+          _ecm,
+          motor4_angle,
+          motor4_angular_velocity))
+    {
+      return;
+    }
+
+    for (std::size_t i = 0;
+        i < this->joint_entities_.size();
+        ++i)
     {
       auto pos_comp =
         _ecm.Component<components::JointPosition>(
@@ -346,13 +377,15 @@ void DeltaMotorController2::PreUpdate(
 
       if (i == 3)
       {
-        this->motor4_zero_position_ = pos_comp->Data()[0];
-        this->targets_[i] = 0.0;
+        // Khi controller vừa chạy, giữ nguyên hướng tuyệt đối hiện tại
+        // của 411111 so với base_link.
+        this->targets_[i] = motor4_angle;
       }
       else
       {
         this->targets_[i] = pos_comp->Data()[0];
       }
+
       this->velocity_targets_[i] = 0.0;
       this->acceleration_targets_[i] = 0.0;
       this->integrals_[i] = 0.0;
@@ -366,20 +399,19 @@ void DeltaMotorController2::PreUpdate(
   {
     std::lock_guard<std::mutex> lock(this->mutex_);
 
-    // Keep calibrating the fourth output as HOME until the first command is
-    // received. Loop attachment may happen after the controller is loaded.
-    if (!this->joint_ref_mode_ && this->last_trajectory_id_ < 0)
+    if (this->trajectory_received_)
     {
-      const auto output_position =
-        _ecm.Component<components::JointPosition>(
-          this->joint_entities_[3]);
-      if (output_position && !output_position->Data().empty())
-      {
-        this->motor4_zero_position_ = output_position->Data()[0];
-        this->targets_[3] = 0.0;
-        this->integrals_[3] = 0.0;
-      }
+      this->trajectory_sim_start_ = sim_time;
+      this->current_trajectory_time_ = 0.0;
+      this->trajectory_active_ = true;
+      this->trajectory_received_ = false;
+      this->last_segment_index_ = 0;
+
+      gzmsg << "Trajectory started at sim_time="
+            << this->trajectory_sim_start_ << "\n";
     }
+
+    
 
     if (this->trajectory_received_)
     {
@@ -472,12 +504,21 @@ void DeltaMotorController2::PreUpdate(
     if (pos_comp->Data().empty() || vel_comp->Data().empty())
       continue;
 
-    const double theta_current = i == 3 ?
-      std::atan2(
-        std::sin(pos_comp->Data()[0] - this->motor4_zero_position_),
-        std::cos(pos_comp->Data()[0] - this->motor4_zero_position_)) :
-      pos_comp->Data()[0];
-    const double omega_current = vel_comp->Data()[0];
+    double theta_current = pos_comp->Data()[0];
+    double omega_current = vel_comp->Data()[0];
+
+    if (i == 3)
+    {
+      // Motor 4 không dùng trực tiếp tọa độ joint làm hướng.
+      // Đo hướng của chính link 411111 trong hệ base_link.
+      if (!this->MeasureMotor4Orientation(
+            _ecm,
+            theta_current,
+            omega_current))
+      {
+        continue;
+      }
+    }
 
     const double theta_target = targets_copy[i];
     const double omega_target = velocity_targets_copy[i];
@@ -601,16 +642,28 @@ void DeltaMotorController2::PreUpdate(
       }
 
       gz::msgs::Double theta_msg;
-      const double reported_position = i == 3 ?
-        std::atan2(
-          std::sin(pos_comp->Data()[0] - this->motor4_zero_position_),
-          std::cos(pos_comp->Data()[0] - this->motor4_zero_position_)) :
-        pos_comp->Data()[0];
+
+      double reported_position = pos_comp->Data()[0];
+      double reported_velocity = vel_comp->Data()[0];
+
+      if (i == 3)
+      {
+        if (!this->MeasureMotor4Orientation(
+              _ecm,
+              reported_position,
+              reported_velocity))
+        {
+          joints_ready = false;
+          continue;
+        }
+      }
+
       theta_msg.set_data(reported_position);
 
       this->theta_feedback_pubs_[i].Publish(theta_msg);
+
       theta_actual[i] = reported_position;
-      omega_actual[i] = vel_comp->Data()[0];
+      omega_actual[i] = reported_velocity;
     }
 
     if (this->endlink_entity_ != kNullEntity)
@@ -1058,7 +1111,96 @@ bool DeltaMotorController2::SampleTrajectory(
 
   return true;
 }
+bool DeltaMotorController2::MeasureMotor4Orientation(
+  EntityComponentManager &_ecm,
+  double &_angle,
+  double &_angular_velocity) const
+{
+  if (this->base_entity_ == kNullEntity ||
+      this->motor4_output_link_entity_ == kNullEntity)
+  {
+    return false;
+  }
 
+  // Pose của base_link và 411111 trong hệ world.
+  const math::Pose3d base_world_pose =
+    worldPose(this->base_entity_, _ecm);
+
+  const math::Pose3d output_world_pose =
+    worldPose(this->motor4_output_link_entity_, _ecm);
+
+  // Pose của 411111 biểu diễn trong hệ base_link:
+  // T_base_output = inverse(T_world_base) * T_world_output
+  const math::Pose3d output_base_pose =
+    base_world_pose.Inverse() * output_world_pose;
+
+  // Local X của 411111 là trục quay.
+  // Vì vậy dùng local Z làm vector biểu diễn hướng quay của khâu.
+  math::Vector3d heading_base =
+    output_base_pose.Rot().RotateVector(
+      math::Vector3d::UnitZ);
+
+  // Chỉ xét hướng chiếu trên mặt phẳng XY của base_link.
+  heading_base = math::Vector3d(
+    heading_base.X(),
+    heading_base.Y(),
+    0.0);
+
+  if (heading_base.Length() < 1e-9)
+  {
+    return false;
+  }
+
+  heading_base.Normalize();
+
+  // Góc tuyệt đối của hướng 411111 so với trục +X của base_link.
+  // Kết quả thuộc [-pi, pi].
+  _angle = std::atan2(
+    heading_base.Y(),
+    heading_base.X());
+
+  Link output_link(this->motor4_output_link_entity_);
+  Link base_link(this->base_entity_);
+
+  const auto output_angular_velocity =
+    output_link.WorldAngularVelocity(_ecm);
+
+  const auto base_angular_velocity =
+    base_link.WorldAngularVelocity(_ecm);
+
+  if (!output_angular_velocity)
+  {
+    return false;
+  }
+
+  // Trục quay của 411111 trong hệ world.
+  math::Vector3d spin_axis_world =
+    output_world_pose.Rot().RotateVector(
+      math::Vector3d::UnitX);
+
+  if (spin_axis_world.Length() < 1e-9)
+  {
+    return false;
+  }
+
+  spin_axis_world.Normalize();
+
+  // Vận tốc góc tương đối giữa 411111 và base_link.
+  math::Vector3d relative_angular_velocity =
+    *output_angular_velocity;
+
+  if (base_angular_velocity)
+  {
+    relative_angular_velocity -= *base_angular_velocity;
+  }
+
+  // Thành phần vận tốc quanh trục quay của khâu.
+  _angular_velocity =
+    spin_axis_world.Dot(relative_angular_velocity);
+
+  return std::isfinite(_angle) &&
+         std::isfinite(_angular_velocity);
+}
 double DeltaMotorController2::Clamp(
   double value,
   double min_value,

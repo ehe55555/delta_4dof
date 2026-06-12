@@ -82,7 +82,12 @@ private:
 
   void ApplyTwistStabilizers(
     gz::sim::EntityComponentManager &_ecm);
-
+  
+// Đo hướng tuyệt đối của khâu cuối 411111 trong hệ base_link.
+  bool MeasureMotor4Orientation(
+    gz::sim::EntityComponentManager &_ecm,
+    double &_angle,
+    double &_angular_velocity) const;
 private:
   gz::sim::Model model_{gz::sim::kNullEntity};
 
@@ -103,7 +108,9 @@ private:
   gz::sim::Entity base_entity_{gz::sim::kNullEntity};
   gz::sim::Entity endlink_entity_{gz::sim::kNullEntity};
   gz::sim::Entity motor4_input_joint_entity_{gz::sim::kNullEntity};
-  double motor4_zero_position_{0.0};
+  gz::sim::Entity motor4_output_link_entity_{
+    gz::sim::kNullEntity
+  };
 
   std::array<std::string, 6> twist_parent_names_{
     "1", "1", "2", "2", "3", "3"
