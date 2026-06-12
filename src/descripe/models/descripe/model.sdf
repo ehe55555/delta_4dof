@@ -944,7 +944,7 @@
           <velocity>1000</velocity>
         </limit>
         <dynamics>
-          <damping>0.02</damping>
+          <damping>0.001</damping>
           <friction>0.0</friction>
         </dynamics>
       </axis>
@@ -962,7 +962,7 @@
           <velocity>1000</velocity>
         </limit>
         <dynamics>
-          <damping>0.02</damping>
+          <damping>0.001</damping>
           <friction>0.0</friction>
         </dynamics>
       </axis>
@@ -980,7 +980,7 @@
           <velocity>1000</velocity>
         </limit>
         <dynamics>
-          <damping>0.02</damping>
+          <damping>0.001</damping>
           <friction>0.0</friction>
         </dynamics>
       </axis>
@@ -998,7 +998,7 @@
           <velocity>1000</velocity>
         </limit>
         <dynamics>
-          <damping>0.02</damping>
+          <damping>0.001</damping>
           <friction>0.0</friction>
         </dynamics>
       </axis>
@@ -1016,7 +1016,7 @@
           <velocity>1000</velocity>
         </limit>
         <dynamics>
-          <damping>0.02</damping>
+          <damping>0.001</damping>
           <friction>0.0</friction>
         </dynamics>
       </axis>
@@ -1034,44 +1034,44 @@
           <velocity>1000</velocity>
         </limit>
         <dynamics>
-          <damping>0.02</damping>
+          <damping>0.001</damping>
           <friction>0.0</friction>
         </dynamics>
       </axis>
     </joint>
     <plugin filename="libgz-sim-detachable-joint-system.so" name="gz::sim::systems::DetachableJoint"> 
       <parent_link>end</parent_link>
-      <child_model>descripe</child_model>
+      <child_model>__model__</child_model>
       <child_link>121</child_link>
       <attach_topic>close_loop_121</attach_topic>
     </plugin>
     <plugin filename="libgz-sim-detachable-joint-system.so" name="gz::sim::systems::DetachableJoint">
       <parent_link>end</parent_link>
-      <child_model>descripe</child_model>
+      <child_model>__model__</child_model>
       <child_link>211</child_link>
       <attach_topic>close_loop_211</attach_topic>
     </plugin>
     <plugin filename="libgz-sim-detachable-joint-system.so" name="gz::sim::systems::DetachableJoint">
       <parent_link>end</parent_link>
-      <child_model>descripe</child_model>
+      <child_model>__model__</child_model>
       <child_link>221</child_link>
       <attach_topic>close_loop_221</attach_topic>
     </plugin>
     <plugin filename="libgz-sim-detachable-joint-system.so" name="gz::sim::systems::DetachableJoint">
       <parent_link>end</parent_link>
-      <child_model>descripe</child_model>
+      <child_model>__model__</child_model>
       <child_link>311</child_link>
       <attach_topic>close_loop_311</attach_topic>
     </plugin>
     <plugin filename="libgz-sim-detachable-joint-system.so" name="gz::sim::systems::DetachableJoint">
       <parent_link>end</parent_link>
-      <child_model>descripe</child_model>
+      <child_model>__model__</child_model>
       <child_link>321</child_link>
       <attach_topic>close_loop_321</attach_topic>
     </plugin>
     <plugin filename="libgz-sim-detachable-joint-system.so" name="gz::sim::systems::DetachableJoint">
       <parent_link>411111</parent_link>
-      <child_model>descripe</child_model>
+      <child_model>__model__</child_model>
       <child_link>41111</child_link>
       <attach_topic>close_loop_41111_to_411111</attach_topic>
     </plugin>
@@ -1086,12 +1086,12 @@
       <torque_limit>0.25</torque_limit>
       <integral_limit>0.25</integral_limit>
       <!-- Motor 4 drives the revolute output link 411111. -->
-      <kp4>0.001</kp4>
+      <kp4>0.02</kp4>
       <ki4>0.0</ki4>
-      <kd4>0.0002</kd4>
-      <kv4>0.0</kv4>
+      <kd4>0.002</kd4>
+      <kv4>0.04</kv4>
       <ka4>0.0</ka4>
-      <torque_limit4>0.002</torque_limit4>
+      <torque_limit4>0.03</torque_limit4>
       <integral_limit4>0.0</integral_limit4>
       <anti_windup_gain>5.0</anti_windup_gain>
       <twist_kp>0.00030</twist_kp>

@@ -1074,16 +1074,37 @@ class DeltaControlApp:
 
     def _execute_from_fields(self):
         try:
-            samples = self._plan(
-                self._target_from_fields(),
-                float(self.duration.get()),
-                int(self.waypoints.get()),
-                math.radians(float(self.rz_deg.get())),
-            )
-            self._publish(samples)
-        except (ValueError, DeltaIKError) as error:
-            messagebox.showerror("Khong chay duoc quy dao", str(error))
+            target = self._target_from_fields()
+            current = self._current_point()
 
+            duration = float(self.duration.get())
+            count = int(self.waypoints.get())
+            target_rz = math.radians(float(self.rz_deg.get()))
+
+            xyz_distance = math.dist(target, current)
+
+            # Nếu XYZ nhập gần vị trí hiện tại thì hiểu là chỉ quay R.
+            if xyz_distance <= 0.0005:
+                samples = self._plan_rotation_only(
+                    target_rz,
+                    duration,
+                    count,
+                )
+            else:
+                samples = self._plan(
+                    target,
+                    duration,
+                    count,
+                    target_rz,
+                )
+
+            self._publish(samples)
+
+        except (ValueError, DeltaIKError) as error:
+            messagebox.showerror(
+                "Khong chay duoc quy dao",
+                str(error),
+            )
     def _publish(self, samples):
         self.trajectory_id += 1
         self.node.publish_trajectory(samples, self.trajectory_id)
@@ -1211,24 +1232,127 @@ class DeltaControlApp:
         except (ValueError, DeltaIKError) as error:
             self._cancel_hold_jog()
             messagebox.showerror("Jog ngoai workspace", str(error))
+        def _plan_rotation_only(self, target_rz, duration, count):
+            duration = float(duration)
+            count = int(count)
 
+            if duration <= 0.0:
+                raise ValueError("Thoi gian quay phai lon hon 0.")
+
+            if count < 2:
+                raise ValueError("So waypoint phai lon hon hoac bang 2.")
+
+            actual_q = self.node.feedback_theta
+
+            if actual_q is None or len(actual_q) < 4:
+                raise ValueError(
+                    "Chua nhan duoc feedback q1, q2, q3 va Rz tu Gazebo."
+                )
+
+            # Giữ tuyệt đối motor 1, 2, 3 tại vị trí hiện tại.
+            q_hold = (
+                float(actual_q[0]),
+                float(actual_q[1]),
+                float(actual_q[2]),
+            )
+
+            start_rz = float(actual_q[3])
+
+            delta_rz = self.solver.normalize_angle(
+                float(target_rz) - start_rz
+            )
+
+            point = self._current_point()
+
+            samples = []
+
+            for k in range(count):
+                tau = float(k) / float(count - 1)
+                t = tau * duration
+
+                tau2 = tau * tau
+                tau3 = tau2 * tau
+                tau4 = tau3 * tau
+                tau5 = tau4 * tau
+
+                blend = (
+                    10.0 * tau3
+                    - 15.0 * tau4
+                    + 6.0 * tau5
+                )
+
+                blend_dot = (
+                    30.0 * tau2
+                    - 60.0 * tau3
+                    + 30.0 * tau4
+                ) / duration
+
+                blend_ddot = (
+                    60.0 * tau
+                    - 180.0 * tau2
+                    + 120.0 * tau3
+                ) / (duration * duration)
+
+                rz = start_rz + blend * delta_rz
+                rz_dot = blend_dot * delta_rz
+                rz_ddot = blend_ddot * delta_rz
+
+                samples.append(
+                    {
+                        "index": k,
+                        "t": t,
+                        "tau": tau,
+
+                        # Không tạo chuyển động XYZ.
+                        "p": point,
+                        "p_dot": (0.0, 0.0, 0.0),
+                        "p_ddot": (0.0, 0.0, 0.0),
+
+                        # Giữ q1–q3, chỉ thay đổi q4.
+                        "q": (*q_hold, rz),
+                        "q_dot": (0.0, 0.0, 0.0, rz_dot),
+                        "q_ddot": (0.0, 0.0, 0.0, rz_ddot),
+                    }
+                )
+
+            self.last_samples = samples
+            self.last_target = point
+            self.rz_deg.set(round(math.degrees(target_rz), 3))
+
+            self._show_samples(samples)
+
+            self.summary.set(
+                f"Quay R: {math.degrees(delta_rz):+.3f} deg"
+            )
+
+            self.status.set(
+                "Da lap trajectory quay R, q1-q3 duoc giu nguyen"
+            )
+
+            return samples
     def _jog_rotation(self, direction):
         try:
             target_rz = (
                 self._current_rotation()
-                + direction * math.radians(float(self.rotation_step_deg.get()))
+                + direction
+                * math.radians(float(self.rotation_step_deg.get()))
             )
+
             target_rz = self.solver.normalize_angle(target_rz)
-            samples = self._plan(
-                self._current_point(),
+
+            samples = self._plan_rotation_only(
+                target_rz,
                 float(self.jog_time.get()),
                 31,
-                target_rz,
             )
-            self._publish(samples)
-        except (ValueError, DeltaIKError) as error:
-            messagebox.showerror("Khong quay duoc khau cuoi", str(error))
 
+            self._publish(samples)
+
+        except (ValueError, DeltaIKError) as error:
+            messagebox.showerror(
+                "Khong quay duoc khau cuoi",
+                str(error),
+            )
     def _go_home(self):
         try:
             target = (
