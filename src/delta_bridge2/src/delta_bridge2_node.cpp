@@ -93,8 +93,11 @@ private:
     const double trajectory_id = msg->data[0];
     const double n_waypoints = msg->data[1];
 
+    const std::size_t n = static_cast<std::size_t>(n_waypoints);
+    const std::size_t legacy_size = 2 + n * 10;
+    const std::size_t four_dof_size = 2 + n * 13;
     const std::size_t expected_size =
-      2 + static_cast<std::size_t>(n_waypoints) * 10;
+      msg->data.size() >= four_dof_size ? four_dof_size : legacy_size;
 
     RCLCPP_INFO(
       this->get_logger(),

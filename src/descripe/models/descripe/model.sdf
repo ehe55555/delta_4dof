@@ -1021,12 +1021,12 @@
         </dynamics>
       </axis>
     </joint>
-    <joint name="joint_411111" type="revolute">
-      <parent>41111</parent>
+    <joint name="joint_end_411111" type="revolute">
+      <parent>end</parent>
       <child>411111</child>
-      <pose relative_to="41111">0 0 0 1.5708 0 1.5708</pose>
+      <pose relative_to="411111">0 0 0 0 0 0</pose>
       <axis>
-        <xyz>0 0 1</xyz>
+        <xyz>1 0 0</xyz>
         <limit>
           <lower>-6.28</lower>
           <upper>6.28</upper>
@@ -1072,16 +1072,33 @@
     <plugin filename="libgz-sim-detachable-joint-system.so" name="gz::sim::systems::DetachableJoint">
       <parent_link>end</parent_link>
       <child_model>descripe</child_model>
-      <child_link>411111</child_link>
-      <attach_topic>close_loop_411111</attach_topic>
+      <child_link>41111</child_link>
+      <attach_topic>close_loop_41111</attach_topic>
     </plugin>
     <plugin filename="libgz_delta_controller2.so"
             name="gz::sim::systems::DeltaMotorController2">
-      <kp>1.0</kp>
-      <ki>0.0</ki>
-      <kd>0.10</kd>
+      <kp>4.0</kp>
+      <ki>1.0</ki>
+      <kd>0.18</kd>
+      <!-- Feedforward: compensate joint damping and reflected inertia. -->
+      <kv>0.020</kv>
       <ka>0.0</ka>
-      <torque_limit>0.15</torque_limit>
+      <torque_limit>0.25</torque_limit>
+      <integral_limit>0.25</integral_limit>
+      <!-- Motor 4 drives the revolute output link 411111. -->
+      <kp4>0.001</kp4>
+      <ki4>0.0</ki4>
+      <kd4>0.0002</kd4>
+      <kv4>0.0</kv4>
+      <ka4>0.0</ka4>
+      <torque_limit4>0.002</torque_limit4>
+      <integral_limit4>0.0</integral_limit4>
+      <anti_windup_gain>5.0</anti_windup_gain>
+      <twist_kp>0.00030</twist_kp>
+      <twist_kd>0.000025</twist_kd>
+      <twist_torque_limit>0.00080</twist_torque_limit>
+      <!-- 1 ms physics step / 10 = approximately 100 Hz feedback. -->
+      <feedback_decimation>10</feedback_decimation>
     </plugin>
     <joint name="world_to_base_link" type="fixed">
       <parent>world</parent>

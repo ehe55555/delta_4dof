@@ -15,6 +15,8 @@
 #include <gz/sim/EventManager.hh>
 #include <gz/sim/EntityComponentManager.hh>
 
+#include <gz/math/Vector3.hh>
+
 #include <gz/transport/Node.hh>
 #include <gz/msgs/double.pb.h>
 #include <gz/msgs/double_v.pb.h>
@@ -53,14 +55,15 @@ private:
   {
     double t{0.0};
 
-    std::array<double, 3> q{0.0, 0.0, 0.0};
-    std::array<double, 3> qd{0.0, 0.0, 0.0};
-    std::array<double, 3> qdd{0.0, 0.0, 0.0};
+    std::array<double, 4> q{0.0, 0.0, 0.0, 0.0};
+    std::array<double, 4> qd{0.0, 0.0, 0.0, 0.0};
+    std::array<double, 4> qdd{0.0, 0.0, 0.0, 0.0};
   };
 
   void OnTarget1(const gz::msgs::Double &_msg);
   void OnTarget2(const gz::msgs::Double &_msg);
   void OnTarget3(const gz::msgs::Double &_msg);
+  void OnTarget4(const gz::msgs::Double &_msg);
 
   // Old style: receive one target at a time
   void OnJointReference(const gz::msgs::Double_V &_msg);
@@ -71,22 +74,27 @@ private:
   // Sample stored trajectory at time t
   bool SampleTrajectory(
     double t,
-    std::array<double, 3> &q_ref,
-    std::array<double, 3> &qd_ref,
-    std::array<double, 3> &qdd_ref);
+    std::array<double, 4> &q_ref,
+    std::array<double, 4> &qd_ref,
+    std::array<double, 4> &qdd_ref);
 
   double Clamp(double value, double min_value, double max_value) const;
+
+  void ApplyTwistStabilizers(
+    gz::sim::EntityComponentManager &_ecm);
 
 private:
   gz::sim::Model model_{gz::sim::kNullEntity};
 
-  std::array<std::string, 3> joint_names_{
+  std::array<std::string, 4> joint_names_{
     "joint_1",
     "joint_2",
-    "joint_3"
+    "joint_3",
+    "joint_end_411111"
   };
 
-  std::array<gz::sim::Entity, 3> joint_entities_{
+  std::array<gz::sim::Entity, 4> joint_entities_{
+    gz::sim::kNullEntity,
     gz::sim::kNullEntity,
     gz::sim::kNullEntity,
     gz::sim::kNullEntity
@@ -94,15 +102,42 @@ private:
 
   gz::sim::Entity base_entity_{gz::sim::kNullEntity};
   gz::sim::Entity endlink_entity_{gz::sim::kNullEntity};
+  gz::sim::Entity motor4_input_joint_entity_{gz::sim::kNullEntity};
+  double motor4_zero_position_{0.0};
 
-  std::array<gz::transport::Node::Publisher, 3> theta_feedback_pubs_;
+  std::array<std::string, 6> twist_parent_names_{
+    "1", "1", "2", "2", "3", "3"
+  };
+  std::array<std::string, 6> twist_child_names_{
+    "11", "12", "21", "22", "31", "32"
+  };
+  std::array<gz::sim::Entity, 6> twist_parent_entities_{
+    gz::sim::kNullEntity, gz::sim::kNullEntity,
+    gz::sim::kNullEntity, gz::sim::kNullEntity,
+    gz::sim::kNullEntity, gz::sim::kNullEntity
+  };
+  std::array<gz::sim::Entity, 6> twist_child_entities_{
+    gz::sim::kNullEntity, gz::sim::kNullEntity,
+    gz::sim::kNullEntity, gz::sim::kNullEntity,
+    gz::sim::kNullEntity, gz::sim::kNullEntity
+  };
+  std::array<gz::math::Vector3d, 6> twist_reference_y_;
+  std::array<gz::math::Vector3d, 6> twist_reference_z_;
+  std::array<bool, 6> twist_reference_initialized_{
+    false, false, false, false, false, false
+  };
+  std::array<gz::transport::Node::Publisher, 6> twist_angle_debug_pubs_;
+  std::array<gz::transport::Node::Publisher, 6> twist_rate_debug_pubs_;
+
+  std::array<gz::transport::Node::Publisher, 4> theta_feedback_pubs_;
   std::array<gz::transport::Node::Publisher, 3> xyz_feedback_pubs_;
+  gz::transport::Node::Publisher state_feedback_pub_;
 
-  std::array<gz::transport::Node::Publisher, 3> error_debug_pubs_;
-  std::array<gz::transport::Node::Publisher, 3> omega_debug_pubs_;
-  std::array<gz::transport::Node::Publisher, 3> torque_raw_debug_pubs_;
-  std::array<gz::transport::Node::Publisher, 3> torque_cmd_debug_pubs_;
-  std::array<gz::transport::Node::Publisher, 3> saturated_debug_pubs_;
+  std::array<gz::transport::Node::Publisher, 4> error_debug_pubs_;
+  std::array<gz::transport::Node::Publisher, 4> omega_debug_pubs_;
+  std::array<gz::transport::Node::Publisher, 4> torque_raw_debug_pubs_;
+  std::array<gz::transport::Node::Publisher, 4> torque_cmd_debug_pubs_;
+  std::array<gz::transport::Node::Publisher, 4> saturated_debug_pubs_;
 
   int feedback_counter_{0};
   int feedback_decimation_{20};
@@ -113,11 +148,13 @@ private:
   //   1. OnJointReference()
   //   2. SampleTrajectory() in PreUpdate()
   // =====================================================
-  std::array<double, 3> targets_{0.0, 0.0, 0.0};
-  std::array<double, 3> velocity_targets_{0.0, 0.0, 0.0};
-  std::array<double, 3> acceleration_targets_{0.0, 0.0, 0.0};
+  std::array<double, 4> targets_{0.0, 0.0, 0.0, 0.0};
+  std::array<double, 4> velocity_targets_{0.0, 0.0, 0.0, 0.0};
+  std::array<double, 4> acceleration_targets_{0.0, 0.0, 0.0, 0.0};
 
-  std::array<double, 3> integrals_{0.0, 0.0, 0.0};
+  std::array<double, 4> integrals_{0.0, 0.0, 0.0, 0.0};
+  std::array<double, 4> last_torque_commands_{0.0, 0.0, 0.0, 0.0};
+  std::array<double, 4> last_saturated_{0.0, 0.0, 0.0, 0.0};
 
   // =====================================================
   // Full trajectory storage
@@ -132,6 +169,7 @@ private:
 
   double trajectory_sim_start_{0.0};
   double trajectory_duration_{0.0};
+  double current_trajectory_time_{0.0};
 
   std::size_t last_segment_index_{0};
 
@@ -140,19 +178,34 @@ private:
   // Count how many update steps each motor torque was clamped.
   // Useful to know whether tracking error is caused by torque limit.
   // =====================================================
-  std::array<int, 3> saturation_count_{0, 0, 0};
+  std::array<int, 4> saturation_count_{0, 0, 0, 0};
 
   // =====================================================
-  // PID + acceleration feedforward gains
+  // PID + velocity / acceleration feedforward gains
   // =====================================================
   double kp_{80.0};
   double ki_{0.0};
   double kd_{5.0};
 
+  // Compensates viscous damping and other velocity-proportional loads.
+  double kv_{0.0};
+
   // Acceleration feedforward gain
   double ka_{0.0};
 
   double torque_limit_{20.0};
+  double integral_limit_{0.25};
+  double anti_windup_gain_{1.0};
+  double kp4_{4.0};
+  double ki4_{1.0};
+  double kd4_{0.18};
+  double kv4_{0.020};
+  double ka4_{0.0};
+  double torque_limit4_{0.25};
+  double integral_limit4_{0.25};
+  double twist_kp_{0.0};
+  double twist_kd_{0.0};
+  double twist_torque_limit_{0.0};
 
   bool configured_{false};
   bool targets_initialized_{false};

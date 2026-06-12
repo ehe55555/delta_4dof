@@ -8,7 +8,12 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    workspace = os.path.join(os.path.expanduser("~"), "delta_4dof")
+    workspace = os.environ.get("DELTA_4DOF_ROOT")
+    if not workspace:
+        raise RuntimeError(
+            "DELTA_4DOF_ROOT is not set. Start with run_delta_control.sh."
+        )
+    workspace = os.path.abspath(workspace)
     world = os.path.join(
         workspace,
         "src",
@@ -16,7 +21,10 @@ def generate_launch_description():
         "worlds",
         "descripe_test.world",
     )
-    model_path = os.path.join(workspace, "src", "descripe", "models")
+    model_paths = [
+        os.path.join(workspace, "src", "descripe", "models"),
+        os.path.join(workspace, "src"),
+    ]
     controller_path = os.path.join(
         workspace,
         "install",
@@ -29,12 +37,16 @@ def generate_launch_description():
     plugin_path = ":".join(
         value for value in (controller_path, old_plugin_path) if value
     )
+    old_resource_path = os.environ.get("GZ_SIM_RESOURCE_PATH", "")
+    resource_path = ":".join(
+        value for value in (*model_paths, old_resource_path) if value
+    )
 
     return LaunchDescription(
         [
             SetEnvironmentVariable(
                 name="GZ_SIM_RESOURCE_PATH",
-                value=model_path,
+                value=resource_path,
             ),
             SetEnvironmentVariable(
                 name="GZ_SIM_SYSTEM_PLUGIN_PATH",

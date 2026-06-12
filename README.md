@@ -1,71 +1,175 @@
 # Delta 4DOF
 
-## Cách mở chương trình
+ROS 2 Jazzy + Gazebo Harmonic simulation and control GUI.
 
-Project này dùng ROS 2 Jazzy và Gazebo để chạy mô phỏng robot Delta 4DOF.
+Prerequisite: Ubuntu 24.04 with the ROS 2 Jazzy apt repository configured.
+The launcher checks ROS 2, but it does not configure the ROS apt repository or
+install the ROS distribution itself.
 
----
+## Portable folder
 
-## Lần đầu tiên sau khi tải project về
+The source package only needs:
 
-Sau khi tải project từ GitHub về, mở thư mục:
+- `src/`
+- `RUN_DELTA_4DOF.sh`
+- `run_delta_control.sh`
+- `run_gazebo.sh`
+- `RUN_DELTA_4DOF.desktop`
+- `README.md`
 
-delta_4dof
+Do not copy `.git/`, `build/`, `install/` or `log/` to another machine.
+Those directories are generated locally.
 
-Sau đó bấm file:
+Create a clean folder:
 
-RUN_DELTA_4DOF.sh
+```bash
+./RUN_DELTA_4DOF.sh --package
+```
 
-Chọn:
+The default output is a sibling folder named `delta_4dof_package`.
+An explicit destination can also be used:
 
-Run as a Program
+```bash
+./RUN_DELTA_4DOF.sh --package /path/to/delta_4dof
+```
 
-File RUN_DELTA_4DOF.sh sẽ tự động:
+## First run
 
-1. Kiểm tra các package cần thiết
-2. Build workspace nếu chưa build
-3. Tạo shortcut ngoài Desktop
-4. Mở chương trình Delta 4DOF
+Open a terminal in the copied folder:
 
----
-
-## Các lần sau
-
-Sau lần chạy đầu tiên, chương trình sẽ tạo shortcut ngoài Desktop tên là:
-
-Delta 4DOF Control
-
-Từ lần thứ hai trở đi, chỉ cần bấm shortcut này trên Desktop để mở chương trình.
-
-Shortcut này sẽ gọi file:
-
-run_delta_control.sh
-
-để chạy:
-
-Gazebo + bridge + feedback + giao diện điều khiển
-
----
-
-## Nếu không bấm được bằng chuột
-
-Mở terminal trong thư mục delta_4dof, sau đó chạy:
-
+```bash
 chmod +x RUN_DELTA_4DOF.sh
+./RUN_DELTA_4DOF.sh --install-deps
+```
+
+The launcher will:
+
+1. Check ROS 2 Jazzy, Gazebo, colcon and Python modules.
+2. Install missing project dependencies when `--install-deps` is supplied.
+3. Build the workspace.
+4. Create `Delta 4DOF Control` on the Desktop.
+5. Start Gazebo, bridges and the control GUI.
+
+The adjacent `RUN_DELTA_4DOF.desktop` can also be opened with
+**Run as a Program** for the first run.
+
+## Later runs
+
+Open `Delta 4DOF Control` on the Desktop or run:
+
+```bash
 ./RUN_DELTA_4DOF.sh
+```
 
-Nếu muốn build lại workspace từ đầu:
+The launcher automatically rebuilds when a file under `src/` is newer than
+the current installation.
 
-./RUN_DELTA_4DOF.sh --rebuild
+## Commands
 
----
+```bash
+./RUN_DELTA_4DOF.sh --check
+./RUN_DELTA_4DOF.sh --build --no-run
+./RUN_DELTA_4DOF.sh --rebuild --no-run
+./RUN_DELTA_4DOF.sh --install-desktop --no-run
+./RUN_DELTA_4DOF.sh --package
+```
 
-## Tóm tắt
+The latest launcher output is saved in `last_run_delta_4dof.log`.
 
-Lần đầu:
+## Joint controller
 
-RUN_DELTA_4DOF.sh trong thư mục delta_4dof
+The three active Delta joints use:
 
-Các lần sau:
+```text
+torque = Kp * (q_ref - q)
+       + Ki * integral(q_ref - q)
+       + Kd * (qd_ref - qd)
+       + Kv * qd_ref
+       + Ka * qdd_ref
+```
 
-Delta 4DOF Control ngoài Desktop
+The tuned values are in `src/descripe/models/descripe/model.sdf`:
+
+```xml
+<kp>4.0</kp>
+<ki>1.0</ki>
+<kd>0.18</kd>
+<kv>0.020</kv>
+<ka>0.0</ka>
+<torque_limit>0.25</torque_limit>
+<integral_limit>0.25</integral_limit>
+<anti_windup_gain>5.0</anti_windup_gain>
+```
+
+`Kv` compensates velocity-proportional joint load. The controller also uses
+back-calculation anti-windup so the integral term recovers after torque
+saturation. The separate `twist_kp`, `twist_kd` and `twist_torque_limit`
+settings stabilize passive-link rotation and are not part of the active-joint
+PID.
+
+## Workspace tracking benchmark
+
+The workspace planner merges only collinear voxel runs, so a full scan still
+passes through every workspace voxel. Each segment uses quintic interpolation
+and is automatically slowed when a joint would exceed `60 deg/s` or
+`150 deg/s^2`.
+
+With Gazebo and both bridge nodes running, execute:
+
+```bash
+ros2 run delta_control workspace_benchmark \
+  --divisions 6 \
+  --speed 0.04 \
+  --preserve-voxels \
+  --output /tmp/delta_workspace_benchmark.json
+```
+
+The report includes joint position and velocity errors, Cartesian error,
+peak torque, saturation percentage and the coordinates of the worst samples.
+
+## Branch 4 final-link rotation (motor 4)
+
+The GUI uses motor 4 to control the Z orientation of link `411111`, not link
+`end`. Enter the target in `Huong khau 411111 Rz (deg)`, or use the `R-` and
+`R+` jog buttons. Position and rotation are interpolated together with a
+quintic profile. The motor-4 closed loop measures the pose and angular velocity
+of `411111` relative to its HOME orientation (`0 deg`); the raw `joint_4`
+angle is only displayed for diagnosis.
+
+Motor 4 uses the same PID structure as the XYZ motors, with independently
+tunable SDF parameters:
+
+```xml
+<kp4>0.001</kp4>
+<ki4>0.0</ki4>
+<kd4>0.0002</kd4>
+<kv4>0.0</kv4>
+<ka4>0.0</ka4>
+<torque_limit4>0.002</torque_limit4>
+```
+
+Gazebo must be fully restarted after changing the controller plugin or gains.
+
+To diagnose a custom list of Cartesian points, create a CSV in millimetres:
+
+```csv
+x,y,z
+0,0,-400
+50,0,-420
+50,50,-440
+0,0,-480
+```
+
+Then run:
+
+```bash
+ros2 run delta_control workspace_benchmark \
+  --points-file /path/to/points.csv \
+  --points-unit mm \
+  --speed 0.04 \
+  --output /tmp/delta_points_benchmark.json
+```
+
+The benchmark validates every point and each straight segment, then executes
+`HOME -> points -> HOME`. JSON input may be a list of `[x, y, z]` rows or an
+object containing a `points` list.

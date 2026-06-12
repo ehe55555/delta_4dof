@@ -49,8 +49,8 @@ class DeltaKinematics2:
 
         self.phis = (
             0.0,
-            2.0 * math.pi / 3.0,
             -2.0 * math.pi / 3.0,
+            2.0 * math.pi / 3.0,
         )
 
     @staticmethod
@@ -160,6 +160,7 @@ class DeltaKinematics2:
     def apply_calibration(
         self,
         raw_thetas: tuple[float, float, float],
+        normalize: bool = True,
     ) -> tuple[float, float, float]:
         t1, t2, t3 = raw_thetas
         g = self.g
@@ -168,7 +169,28 @@ class DeltaKinematics2:
         cmd2 = g.motor_sign_2 * t2 + g.motor_offset_2
         cmd3 = g.motor_sign_3 * t3 + g.motor_offset_3
 
+        if normalize:
+            cmd1 = self.normalize_angle(cmd1)
+            cmd2 = self.normalize_angle(cmd2)
+            cmd3 = self.normalize_angle(cmd3)
+
         return cmd1, cmd2, cmd3
+
+    def is_within_motor_limits(
+        self,
+        x: float,
+        y: float,
+        z: float,
+    ) -> bool:
+        try:
+            raw = self.inverse_kinematics_raw(x, y, z)
+        except DeltaIKError:
+            return False
+        commands = self.apply_calibration(raw, normalize=False)
+        return all(
+            self.g.motor_lower <= value <= self.g.motor_upper
+            for value in commands
+        )
 
     def check_joint_limits(self, thetas: tuple[float, float, float]) -> None:
         for i, theta in enumerate(thetas, start=1):

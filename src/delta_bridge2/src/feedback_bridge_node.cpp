@@ -10,6 +10,7 @@
 
 #include <gz/transport/Node.hh>
 #include <gz/msgs/double.pb.h>
+#include <gz/msgs/double_v.pb.h>
 
 class FeedbackBridgeNode : public rclcpp::Node
 {
@@ -30,6 +31,11 @@ public:
     this->debug_omega_pub_ =
       this->create_publisher<std_msgs::msg::Float64MultiArray>(
         "/delta_robot/debug_omega",
+        10);
+
+    this->state_pub_ =
+      this->create_publisher<std_msgs::msg::Float64MultiArray>(
+        "/delta_robot/state",
         10);
 
     // ==========================
@@ -80,12 +86,17 @@ public:
       &FeedbackBridgeNode::OnOmega3,
       this);
 
+    const bool sub_state = this->gz_node_.Subscribe(
+      "/delta_robot/state_gz",
+      &FeedbackBridgeNode::OnState,
+      this);
+
     RCLCPP_INFO(
       this->get_logger(),
       "feedback_bridge_node subscribe result:\n"
       "  theta1=%s theta2=%s theta3=%s\n"
       "  x=%s y=%s z=%s\n"
-      "  omega1=%s omega2=%s omega3=%s",
+      "  omega1=%s omega2=%s omega3=%s state=%s",
       sub_theta1 ? "true" : "false",
       sub_theta2 ? "true" : "false",
       sub_theta3 ? "true" : "false",
@@ -94,7 +105,8 @@ public:
       sub_z ? "true" : "false",
       sub_omega1 ? "true" : "false",
       sub_omega2 ? "true" : "false",
-      sub_omega3 ? "true" : "false");
+      sub_omega3 ? "true" : "false",
+      sub_state ? "true" : "false");
 
     this->timer_ = this->create_wall_timer(
       std::chrono::milliseconds(20),
@@ -105,7 +117,8 @@ public:
       "feedback_bridge_node started:\n"
       "  Gazebo feedback/*_gz -> ROS /delta_robot/feedback_xyz\n"
       "  Gazebo feedback/theta*_gz -> ROS /delta_robot/feedback_theta\n"
-      "  Gazebo debug/omega*_gz -> ROS /delta_robot/debug_omega");
+      "  Gazebo debug/omega*_gz -> ROS /delta_robot/debug_omega\n"
+      "  Gazebo /delta_robot/state_gz -> ROS /delta_robot/state");
   }
 
 private:
@@ -262,6 +275,18 @@ private:
     this->SetValue(this->omega_, this->omega_ready_, 2, _msg.data());
   }
 
+  void OnState(const gz::msgs::Double_V &_msg)
+  {
+    if (_msg.data_size() < 22)
+      return;
+
+    std_msgs::msg::Float64MultiArray msg;
+    msg.data.reserve(_msg.data_size());
+    for (int i = 0; i < _msg.data_size(); ++i)
+      msg.data.push_back(_msg.data(i));
+    this->state_pub_->publish(msg);
+  }
+
 private:
   gz::transport::Node gz_node_;
 
@@ -273,6 +298,9 @@ private:
 
   rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
     debug_omega_pub_;
+
+  rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr
+    state_pub_;
 
   rclcpp::TimerBase::SharedPtr timer_;
 

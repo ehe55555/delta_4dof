@@ -15,7 +15,11 @@ from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
 
 from delta_control.kinematics import DeltaIKError, DeltaKinematics2
-from delta_control.workspace import calculate_workspace_surface
+from delta_control.workspace import (
+    calculate_workspace_surface,
+    compress_collinear_path,
+    generate_limited_joint_segment,
+)
 
 
 class DeltaControlNode(Node):
@@ -35,6 +39,17 @@ class DeltaControlNode(Node):
         self.feedback_theta = None
         self.feedback_xyz_speed = 0.0
         self.feedback_theta_speed = (0.0, 0.0, 0.0)
+        self.feedback_xyz_time = None
+        self.feedback_theta_time = None
+        self.feedback_state = None
+        self.feedback_motor4_joint = None
+        self.feedback_state_sequence = 0
+        self.create_subscription(
+            Float64MultiArray,
+            "/delta_robot/state",
+            self._on_state,
+            10,
+        )
         self.create_subscription(
             Float64MultiArray,
             "/delta_robot/feedback_xyz",
@@ -49,6 +64,8 @@ class DeltaControlNode(Node):
         )
 
     def _on_xyz(self, msg):
+        if self.feedback_state is not None:
+            return
         if len(msg.data) >= 3 and all(math.isfinite(v) for v in msg.data[:3]):
             now = time.perf_counter()
             xyz = tuple(float(v) for v in msg.data[:3])
@@ -62,6 +79,8 @@ class DeltaControlNode(Node):
             self.feedback_xyz_time = now
 
     def _on_theta(self, msg):
+        if self.feedback_state is not None:
+            return
         if len(msg.data) >= 3 and all(math.isfinite(v) for v in msg.data[:3]):
             now = time.perf_counter()
             theta = tuple(float(v) for v in msg.data[:3])
@@ -81,6 +100,43 @@ class DeltaControlNode(Node):
             self.feedback_theta = theta
             self.feedback_theta_time = now
 
+    def _on_state(self, msg):
+        if len(msg.data) < 22 or not all(math.isfinite(v) for v in msg.data[:22]):
+            return
+
+        values = [float(v) for v in msg.data]
+        sim_time = values[0]
+        xyz = tuple(values[4:7])
+        has_motor4 = len(values) >= 35
+        theta = tuple(values[7:10]) + ((values[28],) if has_motor4 else ())
+        omega = tuple(values[10:13]) + ((values[29],) if has_motor4 else ())
+
+        if self.feedback_state is not None:
+            dt = sim_time - self.feedback_state["sim_time"]
+            if dt > 1e-9:
+                self.feedback_xyz_speed = math.dist(
+                    self.feedback_state["xyz"], xyz
+                ) / dt
+
+        self.feedback_xyz = xyz
+        self.feedback_theta = theta
+        self.feedback_theta_speed = omega
+        self.feedback_motor4_joint = values[35] if len(values) >= 36 else None
+        self.feedback_state_sequence += 1
+        self.feedback_state = {
+            "sequence": self.feedback_state_sequence,
+            "sim_time": sim_time,
+            "trajectory_id": int(round(values[1])),
+            "trajectory_time": values[2],
+            "trajectory_active": values[3] > 0.5,
+            "xyz": xyz,
+            "theta": theta,
+            "omega": omega,
+            "q_ref": tuple(values[13:16]) + ((values[30],) if has_motor4 else ()),
+            "qd_ref": tuple(values[16:19]) + ((values[31],) if has_motor4 else ()),
+            "qdd_ref": tuple(values[19:22]) + ((values[32],) if has_motor4 else ()),
+        }
+
     def publish_trajectory(self, samples, trajectory_id):
         data = [float(trajectory_id), float(len(samples))]
         for sample in samples:
@@ -96,7 +152,9 @@ class DeltaControlNode(Node):
         msg.data = data
         self.trajectory_pub.publish(msg)
 
-    def publish_joint_reference(self, q, q_dot=(0.0, 0.0, 0.0)):
+    def publish_joint_reference(self, q, q_dot=None):
+        if q_dot is None:
+            q_dot = tuple(0.0 for _ in q)
         msg = Float64MultiArray()
         msg.data = [*[float(v) for v in q], *[float(v) for v in q_dot]]
         self.joint_ref_pub.publish(msg)
@@ -114,6 +172,16 @@ class DeltaControlApp:
         self.monitor_start_time = None
         self.monitor_samples = []
         self.monitor_sample_times = []
+        self.monitor_trajectory_id = None
+        self.monitor_last_state_sequence = -1
+        self.monitor_started = False
+        self.monitor_records = []
+        self.monitor_actual_distance = 0.0
+        self.monitor_reference_distance = 0.0
+        self.monitor_previous_actual = None
+        self.monitor_previous_reference = None
+        self.monitor_error_squared_sum = 0.0
+        self.monitor_error_max = 0.0
         self.jog_after_id = None
         self.jog_delay_id = None
         self.held_jog_direction = None
@@ -124,7 +192,8 @@ class DeltaControlApp:
         self.jog_stream_period = 0.05
         self.workspace_running = False
         self.workspace_results = queue.Queue()
-        self.workspace_divisions = tk.IntVar(value=100)
+        self.workspace_divisions = tk.IntVar(value=12)
+        self.workspace_full_scan = tk.BooleanVar(value=True)
         self.last_target = (
             self.solver.g.home_x,
             self.solver.g.home_y,
@@ -140,6 +209,8 @@ class DeltaControlApp:
         self.x_mm = tk.DoubleVar(value=0.0)
         self.y_mm = tk.DoubleVar(value=0.0)
         self.z_mm = tk.DoubleVar(value=-361.867)
+        self.rz_deg = tk.DoubleVar(value=0.0)
+        self.rotation_step_deg = tk.DoubleVar(value=5.0)
         self.duration = tk.DoubleVar(value=3.0)
         self.waypoints = tk.IntVar(value=61)
         self.status = tk.StringVar(value="San sang")
@@ -149,7 +220,7 @@ class DeltaControlApp:
         self._configure_style()
         self._build_ui()
         self.root.bind("<ButtonRelease-1>", self._stop_hold_jog, add="+")
-        self.root.after(20, self._spin_ros)
+        self.root.after(5, self._spin_ros)
         self.root.after(100, self._refresh_feedback)
 
     def _configure_style(self):
@@ -221,8 +292,21 @@ class DeltaControlApp:
             "q2_act",
             "q3_ref",
             "q3_act",
-            "qd_ref",
-            "qd_act",
+            "q4_ref",
+            "q4_act",
+            "qd1_ref",
+            "qd1_act",
+            "e_qd1",
+            "qd2_ref",
+            "qd2_act",
+            "e_qd2",
+            "qd3_ref",
+            "qd3_act",
+            "e_qd3",
+            "qd4_ref",
+            "qd4_act",
+            "e_qd4",
+            "e_qd_max",
             "e_xyz",
             "e_q",
         )
@@ -246,10 +330,23 @@ class DeltaControlApp:
             "q2_act": "q2 act",
             "q3_ref": "q3 ref",
             "q3_act": "q3 act",
-            "qd_ref": "qd ref",
-            "qd_act": "qd act",
-            "e_xyz": "e XYZ",
-            "e_q": "e q",
+            "q4_ref": "Rz ref",
+            "q4_act": "Rz act",
+            "qd1_ref": "qd1 ref",
+            "qd1_act": "qd1 act",
+            "e_qd1": "e qd1",
+            "qd2_ref": "qd2 ref",
+            "qd2_act": "qd2 act",
+            "e_qd2": "e qd2",
+            "qd3_ref": "qd3 ref",
+            "qd3_act": "qd3 act",
+            "e_qd3": "e qd3",
+            "qd4_ref": "Rd ref",
+            "qd4_act": "Rd act",
+            "e_qd4": "e Rd",
+            "e_qd_max": "e qd max (deg/s)",
+            "e_xyz": "e XYZ (mm)",
+            "e_q": "e q max (deg)",
         }
 
         widths = {
@@ -269,10 +366,23 @@ class DeltaControlApp:
             "q2_act": 75,
             "q3_ref": 75,
             "q3_act": 75,
-            "qd_ref": 70,
-            "qd_act": 70,
-            "e_xyz": 70,
-            "e_q": 70,
+            "q4_ref": 75,
+            "q4_act": 75,
+            "qd1_ref": 75,
+            "qd1_act": 75,
+            "e_qd1": 70,
+            "qd2_ref": 75,
+            "qd2_act": 75,
+            "e_qd2": 70,
+            "qd3_ref": 75,
+            "qd3_act": 75,
+            "e_qd3": 70,
+            "qd4_ref": 75,
+            "qd4_act": 75,
+            "e_qd4": 70,
+            "e_qd_max": 120,
+            "e_xyz": 90,
+            "e_q": 100,
         }
 
         for column in columns:
@@ -311,6 +421,17 @@ class DeltaControlApp:
             textvariable=self.jog_time,
             width=9,
         ).grid(row=0, column=3, padx=6)
+        ttk.Label(settings, text="Buoc quay (deg)").grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+        ttk.Spinbox(
+            settings,
+            from_=0.1,
+            to=90.0,
+            increment=1.0,
+            textvariable=self.rotation_step_deg,
+            width=9,
+        ).grid(row=1, column=1, padx=(6, 16), pady=(6, 0))
 
         pad = ttk.Frame(parent)
         pad.pack(pady=4)
@@ -335,6 +456,18 @@ class DeltaControlApp:
         self._create_hold_jog_button(pad, "Z \u2193", (0, 0, -1)).grid(
             row=2, column=3, padx=(18, 5), pady=5, sticky="ew"
         )
+        ttk.Button(
+            pad,
+            text="R- \u21ba",
+            style="Jog.TButton",
+            command=lambda: self._jog_rotation(-1),
+        ).grid(row=3, column=1, padx=5, pady=(12, 5), sticky="ew")
+        ttk.Button(
+            pad,
+            text="R+ \u21bb",
+            style="Jog.TButton",
+            command=lambda: self._jog_rotation(1),
+        ).grid(row=3, column=2, padx=5, pady=(12, 5), sticky="ew")
 
         ttk.Label(
             parent,
@@ -358,6 +491,7 @@ class DeltaControlApp:
             ("X (mm)", self.x_mm),
             ("Y (mm)", self.y_mm),
             ("Z (mm)", self.z_mm),
+            ("Huong khau 411111 Rz (deg)", self.rz_deg),
             ("Thoi gian T (s)", self.duration),
             ("So waypoint N", self.waypoints),
         )
@@ -396,15 +530,35 @@ class DeltaControlApp:
         self.workspace_button.pack(fill="x", pady=(10, 0))
         workspace_settings = ttk.Frame(parent)
         workspace_settings.pack(fill="x", pady=(6, 0))
-        ttk.Label(workspace_settings, text="Chia workspace N").pack(side="left")
-        ttk.Spinbox(
+        ttk.Checkbutton(
+            workspace_settings,
+            text="Quet toan bo voxel",
+            variable=self.workspace_full_scan,
+            command=self._toggle_workspace_mode,
+        ).pack(side="left")
+        self.workspace_division_label = ttk.Label(
+            workspace_settings,
+            text="Chia workspace N",
+        )
+        self.workspace_division_label.pack(side="left", padx=(10, 0))
+        self.workspace_division_spin = ttk.Spinbox(
             workspace_settings,
             from_=5,
             to=24,
             increment=1,
             textvariable=self.workspace_divisions,
             width=7,
-        ).pack(side="right")
+        )
+        self.workspace_division_spin.pack(side="right")
+        self._toggle_workspace_mode()
+
+    def _toggle_workspace_mode(self):
+        if self.workspace_full_scan.get():
+            self.workspace_division_spin.state(["disabled"])
+            self.workspace_division_label.state(["disabled"])
+        else:
+            self.workspace_division_spin.state(["!disabled"])
+            self.workspace_division_label.state(["!disabled"])
 
     def _current_point(self):
         if self.node.feedback_xyz is not None:
@@ -418,18 +572,49 @@ class DeltaControlApp:
             float(self.z_mm.get()) / 1000.0,
         )
 
-    def _plan(self, target, duration, count):
+    def _current_rotation(self):
+        if self.node.feedback_theta is not None and len(self.node.feedback_theta) >= 4:
+            return self.node.feedback_theta[3]
+        return math.radians(float(self.rz_deg.get()))
+
+    def _add_rotation_profile(self, samples, start_angle, target_angle, duration):
+        delta = self.solver.normalize_angle(target_angle - start_angle)
+        for sample in samples:
+            tau = float(sample["tau"])
+            tau2 = tau * tau
+            tau3 = tau2 * tau
+            tau4 = tau3 * tau
+            tau5 = tau4 * tau
+            blend = 10.0 * tau3 - 15.0 * tau4 + 6.0 * tau5
+            blend_dot = (
+                30.0 * tau2 - 60.0 * tau3 + 30.0 * tau4
+            ) / duration
+            blend_ddot = (
+                60.0 * tau - 180.0 * tau2 + 120.0 * tau3
+            ) / (duration * duration)
+            sample["q"] = (*sample["q"][:3], start_angle + blend * delta)
+            sample["q_dot"] = (*sample["q_dot"][:3], blend_dot * delta)
+            sample["q_ddot"] = (*sample["q_ddot"][:3], blend_ddot * delta)
+        return samples
+
+    def _plan(self, target, duration, count, target_rz=None):
         start = self._current_point()
         actual_q = self.node.feedback_theta
+        actual_xyz_q = actual_q[:3] if actual_q is not None else None
+        start_rz = self._current_rotation()
+        if target_rz is None:
+            target_rz = start_rz
         samples = self.solver.generate_joint_trajectory(
             p0=start,
             p1=target,
             duration=float(duration),
             n_waypoints=int(count),
-            preferred_start=actual_q,
+            preferred_start=actual_xyz_q,
         )
-        if actual_q is not None:
-            offsets = tuple(actual_q[i] - samples[0]["q"][i] for i in range(3))
+        if actual_xyz_q is not None:
+            offsets = tuple(
+                actual_xyz_q[i] - samples[0]["q"][i] for i in range(3)
+            )
             for sample in samples:
                 tau = sample["tau"]
                 tau2 = tau * tau
@@ -459,8 +644,15 @@ class DeltaControlApp:
                     / span
                     for i in range(3)
                 )
+        self._add_rotation_profile(
+            samples,
+            start_rz,
+            float(target_rz),
+            float(duration),
+        )
         self.last_samples = samples
         self.last_target = target
+        self.rz_deg.set(round(math.degrees(target_rz), 3))
         self._show_samples(samples)
 
         distance = math.dist(start, target)
@@ -492,7 +684,7 @@ class DeltaControlApp:
         q_dot_ref = sample.get("q_dot", (0.0, 0.0, 0.0))
 
         v_ref = math.sqrt(sum(value * value for value in p_dot_ref)) * 1000.0
-        qd_ref = max(abs(math.degrees(value)) for value in q_dot_ref)
+        qd_ref_deg = tuple(math.degrees(value) for value in q_dot_ref)
 
         if actual_xyz is None:
             actual_xyz = sample.get("actual_xyz")
@@ -507,9 +699,11 @@ class DeltaControlApp:
             actual_q_dot = sample.get("actual_q_dot")
 
         x_act = y_act = z_act = ""
-        q1_act = q2_act = q3_act = ""
+        q1_act = q2_act = q3_act = q4_act = ""
         v_act = ""
-        qd_act = ""
+        qd_act_deg = ("", "", "", "")
+        err_qd_deg = ("", "", "", "")
+        err_qd_max = ""
         err_xyz = ""
         err_q = ""
 
@@ -528,6 +722,8 @@ class DeltaControlApp:
             q1_act = f"{q_act_deg[0]:.2f}"
             q2_act = f"{q_act_deg[1]:.2f}"
             q3_act = f"{q_act_deg[2]:.2f}"
+            if len(q_act_deg) >= 4:
+                q4_act = f"{q_act_deg[3]:.2f}"
 
             err_q_value = max(
                 abs(
@@ -535,7 +731,7 @@ class DeltaControlApp:
                         self.solver.normalize_angle(actual_theta[i] - q_ref[i])
                     )
                 )
-                for i in range(3)
+                for i in range(min(len(actual_theta), len(q_ref)))
             )
             err_q = f"{err_q_value:.2f}"
 
@@ -543,8 +739,21 @@ class DeltaControlApp:
             v_act = f"{actual_v_xyz * 1000.0:.2f}"
 
         if actual_q_dot is not None:
-            qd_act_value = max(abs(math.degrees(value)) for value in actual_q_dot)
-            qd_act = f"{qd_act_value:.2f}"
+            qd_act_values = tuple(
+                math.degrees(value) for value in actual_q_dot
+            )
+            err_qd_values = tuple(
+                abs(qd_act_values[i] - qd_ref_deg[i])
+                for i in range(min(len(qd_act_values), len(qd_ref_deg)))
+            )
+            qd_act_deg = tuple(f"{value:.2f}" for value in qd_act_values)
+            err_qd_deg = tuple(f"{value:.2f}" for value in err_qd_values)
+            err_qd_max = f"{max(err_qd_values):.2f}"
+
+        q4_ref = f"{q_ref_deg[3]:.2f}" if len(q_ref_deg) >= 4 else ""
+        qd4_ref = f"{qd_ref_deg[3]:.2f}" if len(qd_ref_deg) >= 4 else ""
+        qd4_act = qd_act_deg[3] if len(qd_act_deg) >= 4 else ""
+        e_qd4 = err_qd_deg[3] if len(err_qd_deg) >= 4 else ""
 
         return (
             sample["index"],
@@ -563,8 +772,21 @@ class DeltaControlApp:
             q2_act,
             f"{q_ref_deg[2]:.2f}",
             q3_act,
-            f"{qd_ref:.2f}",
-            qd_act,
+            q4_ref,
+            q4_act,
+            f"{qd_ref_deg[0]:.2f}",
+            qd_act_deg[0],
+            err_qd_deg[0],
+            f"{qd_ref_deg[1]:.2f}",
+            qd_act_deg[1],
+            err_qd_deg[1],
+            f"{qd_ref_deg[2]:.2f}",
+            qd_act_deg[2],
+            err_qd_deg[2],
+            qd4_ref,
+            qd4_act,
+            e_qd4,
+            err_qd_max,
             err_xyz,
             err_q,
         )
@@ -586,7 +808,7 @@ class DeltaControlApp:
                 values=self._format_sample_row(sample),
             )
 
-    def _start_execution_monitor(self, samples):
+    def _start_execution_monitor(self, samples, trajectory_id):
         if self.monitor_after_id is not None:
             self.root.after_cancel(self.monitor_after_id)
             self.monitor_after_id = None
@@ -594,43 +816,234 @@ class DeltaControlApp:
         self.monitor_samples = list(samples)
         self.monitor_sample_times = [float(sample["t"]) for sample in samples]
         self.monitor_start_time = time.perf_counter()
+        self.monitor_trajectory_id = trajectory_id
+        self.monitor_last_state_sequence = -1
+        self.monitor_started = False
+        self.monitor_records = []
+        self.monitor_actual_distance = 0.0
+        self.monitor_reference_distance = 0.0
+        self.monitor_previous_actual = None
+        self.monitor_previous_reference = None
+        self.monitor_error_squared_sum = 0.0
+        self.monitor_error_max = 0.0
 
         self._monitor_execution_actual()
+
+    def _reference_at_time(self, trajectory_time, state):
+        index = bisect.bisect_right(self.monitor_sample_times, trajectory_time)
+        if index <= 0:
+            left = right = 0
+            ratio = 0.0
+        elif index >= len(self.monitor_samples):
+            left = right = len(self.monitor_samples) - 1
+            ratio = 0.0
+        else:
+            left = index - 1
+            right = index
+            dt = self.monitor_sample_times[right] - self.monitor_sample_times[left]
+            ratio = 0.0 if dt <= 1e-12 else (
+                trajectory_time - self.monitor_sample_times[left]
+            ) / dt
+
+        left_sample = self.monitor_samples[left]
+        right_sample = self.monitor_samples[right]
+        p_ref = tuple(
+            left_sample["p"][i]
+            + ratio * (right_sample["p"][i] - left_sample["p"][i])
+            for i in range(3)
+        )
+        p_dot_ref = tuple(
+            left_sample.get("p_dot", (0.0, 0.0, 0.0))[i]
+            + ratio
+            * (
+                right_sample.get("p_dot", (0.0, 0.0, 0.0))[i]
+                - left_sample.get("p_dot", (0.0, 0.0, 0.0))[i]
+            )
+            for i in range(3)
+        )
+        nearest = left if ratio < 0.5 else right
+        return {
+            "index": self.monitor_samples[nearest]["index"],
+            "t": trajectory_time,
+            "p": p_ref,
+            "p_dot": p_dot_ref,
+            "q": state["q_ref"],
+            "q_dot": state["qd_ref"],
+            "q_ddot": state["qdd_ref"],
+        }
 
     def _monitor_execution_actual(self):
         if not self.monitor_samples or self.monitor_start_time is None:
             return
 
-        elapsed = time.perf_counter() - self.monitor_start_time
-        index = bisect.bisect_left(self.monitor_sample_times, elapsed)
+        state = self.node.feedback_state
+        wall_elapsed = time.perf_counter() - self.monitor_start_time
 
-        candidates = []
-        if 0 <= index < len(self.monitor_samples):
-            candidates.append(index)
-        if 0 <= index - 1 < len(self.monitor_samples):
-            candidates.append(index - 1)
+        if (
+            state is not None
+            and state["sequence"] != self.monitor_last_state_sequence
+            and state["trajectory_id"] == self.monitor_trajectory_id
+        ):
+            self.monitor_last_state_sequence = state["sequence"]
 
-        if candidates:
-            nearest_index = min(
-                candidates,
-                key=lambda value: abs(self.monitor_sample_times[value] - elapsed),
+            if state["trajectory_active"] or state["trajectory_time"] > 0.0:
+                self.monitor_started = True
+                reference = self._reference_at_time(
+                    state["trajectory_time"], state
+                )
+                actual_xyz = state["xyz"]
+                actual_theta = state["theta"]
+                actual_q_dot = state["omega"]
+                qd_error_values = tuple(
+                    abs(actual_q_dot[i] - state["qd_ref"][i])
+                    for i in range(min(len(actual_q_dot), len(state["qd_ref"])))
+                )
+                qd_error_joint = max(
+                    range(len(qd_error_values)),
+                    key=lambda index: qd_error_values[index],
+                )
+
+                if self.monitor_previous_actual is not None:
+                    self.monitor_actual_distance += math.dist(
+                        self.monitor_previous_actual, actual_xyz
+                    )
+                if self.monitor_previous_reference is not None:
+                    self.monitor_reference_distance += math.dist(
+                        self.monitor_previous_reference, reference["p"]
+                    )
+
+                self.monitor_previous_actual = actual_xyz
+                self.monitor_previous_reference = reference["p"]
+                error_xyz = math.dist(actual_xyz, reference["p"])
+                self.monitor_error_squared_sum += error_xyz * error_xyz
+                self.monitor_error_max = max(self.monitor_error_max, error_xyz)
+
+                record = {
+                    "sim_time": state["sim_time"],
+                    "trajectory_time": state["trajectory_time"],
+                    "p_ref": reference["p"],
+                    "p_actual": actual_xyz,
+                    "q_ref": state["q_ref"],
+                    "q_actual": actual_theta,
+                    "qd_ref": state["qd_ref"],
+                    "qd_actual": actual_q_dot,
+                    "error_qd_joint": qd_error_joint + 1,
+                    "error_qd": qd_error_values[qd_error_joint],
+                    "error_xyz": error_xyz,
+                }
+                self.monitor_records.append(record)
+
+                row_id = f"sample_{reference['index']}"
+                if self.table.exists(row_id):
+                    self.table.item(
+                        row_id,
+                        values=self._format_sample_row(
+                            reference,
+                            actual_xyz=actual_xyz,
+                            actual_theta=actual_theta,
+                            actual_v_xyz=self.node.feedback_xyz_speed,
+                            actual_q_dot=actual_q_dot,
+                        ),
+                    )
+                    self.table.see(row_id)
+
+                if self.monitor_started and not state["trajectory_active"]:
+                    self._finish_execution_monitor()
+                    return
+
+        timeout = self.monitor_sample_times[-1] + 10.0
+        if wall_elapsed <= timeout:
+            self.monitor_after_id = self.root.after(
+                20,
+                self._monitor_execution_actual,
+            )
+        else:
+            self._finish_execution_monitor()
+
+    def _finish_execution_monitor(self):
+        self.monitor_after_id = None
+        count = len(self.monitor_records)
+        if count == 0:
+            self.status.set("Khong nhan duoc state dong bo tu Gazebo")
+            return
+
+        self._fill_table_from_synchronized_records()
+        rmse = math.sqrt(self.monitor_error_squared_sum / count)
+        path_error = self.monitor_actual_distance - self.monitor_reference_distance
+        self.summary.set(
+            f"L ref: {self.monitor_reference_distance * 1000.0:.2f} mm | "
+            f"L act: {self.monitor_actual_distance * 1000.0:.2f} mm | "
+            f"dL: {path_error * 1000.0:+.2f} mm"
+        )
+        self.status.set(
+            f"RMSE XYZ: {rmse * 1000.0:.2f} mm | "
+            f"max: {self.monitor_error_max * 1000.0:.2f} mm"
+        )
+
+    def _fill_table_from_synchronized_records(self):
+        if not self.monitor_records:
+            return
+
+        records = sorted(
+            self.monitor_records,
+            key=lambda record: record["trajectory_time"],
+        )
+        record_times = [record["trajectory_time"] for record in records]
+        sample_by_index = {
+            int(sample["index"]): sample for sample in self.monitor_samples
+        }
+
+        for row_id in self.sample_row_ids:
+            try:
+                sample_index = int(row_id.removeprefix("sample_"))
+                sample = sample_by_index[sample_index]
+            except (KeyError, ValueError):
+                continue
+
+            index = bisect.bisect_right(record_times, float(sample["t"]))
+            if index <= 0:
+                left = right = records[0]
+                ratio = 0.0
+            elif index >= len(records):
+                left = right = records[-1]
+                ratio = 0.0
+            else:
+                left = records[index - 1]
+                right = records[index]
+                dt = right["trajectory_time"] - left["trajectory_time"]
+                ratio = 0.0 if dt <= 1e-12 else (
+                    float(sample["t"]) - left["trajectory_time"]
+                ) / dt
+
+            actual_xyz = tuple(
+                left["p_actual"][axis]
+                + ratio
+                * (right["p_actual"][axis] - left["p_actual"][axis])
+                for axis in range(3)
+            )
+            actual_theta = tuple(
+                left["q_actual"][axis]
+                + ratio
+                * self.solver.normalize_angle(
+                    right["q_actual"][axis] - left["q_actual"][axis]
+                )
+                for axis in range(
+                    min(len(left["q_actual"]), len(right["q_actual"]))
+                )
+            )
+            actual_q_dot = tuple(
+                left["qd_actual"][axis]
+                + ratio
+                * (right["qd_actual"][axis] - left["qd_actual"][axis])
+                for axis in range(
+                    min(len(left["qd_actual"]), len(right["qd_actual"]))
+                )
             )
 
-            sample = self.monitor_samples[nearest_index]
-            row_id = f"sample_{sample['index']}"
-
-            actual_xyz = self.node.feedback_xyz
-            actual_theta = self.node.feedback_theta
-            actual_v_xyz = self.node.feedback_xyz_speed
-            actual_q_dot = self.node.feedback_theta_speed
-
-            if actual_xyz is not None:
-                sample["actual_xyz"] = actual_xyz
-                sample["actual_v_xyz"] = actual_v_xyz
-
-            if actual_theta is not None:
-                sample["actual_theta"] = actual_theta
-                sample["actual_q_dot"] = actual_q_dot
+            dt = right["trajectory_time"] - left["trajectory_time"]
+            actual_v_xyz = 0.0 if dt <= 1e-12 else (
+                math.dist(left["p_actual"], right["p_actual"]) / dt
+            )
 
             if self.table.exists(row_id):
                 self.table.item(
@@ -643,15 +1056,6 @@ class DeltaControlApp:
                         actual_q_dot=actual_q_dot,
                     ),
                 )
-                self.table.see(row_id)
-
-        if elapsed <= self.monitor_sample_times[-1] + 1.0:
-            self.monitor_after_id = self.root.after(
-                100,
-                self._monitor_execution_actual,
-            )
-        else:
-            self.monitor_after_id = None
 
     def _plan_from_fields(self):
         try:
@@ -659,6 +1063,7 @@ class DeltaControlApp:
                 self._target_from_fields(),
                 float(self.duration.get()),
                 int(self.waypoints.get()),
+                math.radians(float(self.rz_deg.get())),
             )
         except (ValueError, DeltaIKError) as error:
             messagebox.showerror("Khong lap duoc quy dao", str(error))
@@ -669,6 +1074,7 @@ class DeltaControlApp:
                 self._target_from_fields(),
                 float(self.duration.get()),
                 int(self.waypoints.get()),
+                math.radians(float(self.rz_deg.get())),
             )
             self._publish(samples)
         except (ValueError, DeltaIKError) as error:
@@ -677,7 +1083,7 @@ class DeltaControlApp:
     def _publish(self, samples):
         self.trajectory_id += 1
         self.node.publish_trajectory(samples, self.trajectory_id)
-        self._start_execution_monitor(samples)
+        self._start_execution_monitor(samples, self.trajectory_id)
         self.status.set(f"Da gui trajectory #{self.trajectory_id} den Gazebo")
     def _start_hold_jog(self, direction):
         self._cancel_hold_jog()
@@ -802,6 +1208,23 @@ class DeltaControlApp:
             self._cancel_hold_jog()
             messagebox.showerror("Jog ngoai workspace", str(error))
 
+    def _jog_rotation(self, direction):
+        try:
+            target_rz = (
+                self._current_rotation()
+                + direction * math.radians(float(self.rotation_step_deg.get()))
+            )
+            target_rz = self.solver.normalize_angle(target_rz)
+            samples = self._plan(
+                self._current_point(),
+                float(self.jog_time.get()),
+                31,
+                target_rz,
+            )
+            self._publish(samples)
+        except (ValueError, DeltaIKError) as error:
+            messagebox.showerror("Khong quay duoc khau cuoi", str(error))
+
     def _go_home(self):
         try:
             target = (
@@ -816,10 +1239,11 @@ class DeltaControlApp:
                 target,
                 float(self.duration.get()),
                 int(self.waypoints.get()),
+                0.0,
             )
-            samples[-1]["q"] = (0.0, 0.0, 0.0)
-            samples[-1]["q_dot"] = (0.0, 0.0, 0.0)
-            samples[-1]["q_ddot"] = (0.0, 0.0, 0.0)
+            samples[-1]["q"] = (0.0, 0.0, 0.0, 0.0)
+            samples[-1]["q_dot"] = (0.0, 0.0, 0.0, 0.0)
+            samples[-1]["q_ddot"] = (0.0, 0.0, 0.0, 0.0)
             self._show_samples(samples)
             self._publish(samples)
         except (ValueError, DeltaIKError) as error:
@@ -834,19 +1258,26 @@ class DeltaControlApp:
             divisions = int(self.workspace_divisions.get())
         except (ValueError, tk.TclError):
             divisions = 12
-        self.status.set(f"Dang chia workspace {divisions} x {divisions} x {divisions}...")
+        full_scan = bool(self.workspace_full_scan.get())
+        if full_scan:
+            self.status.set("Dang tao duong quet qua toan bo voxel workspace...")
+        else:
+            self.status.set(
+                f"Dang chia workspace {divisions} x {divisions} x {divisions}..."
+            )
         threading.Thread(
             target=self._calculate_workspace,
-            args=(divisions,),
+            args=(divisions, full_scan),
             daemon=True,
         ).start()
         self.root.after(50, self._poll_workspace)
 
-    def _calculate_workspace(self, divisions):
+    def _calculate_workspace(self, divisions, full_scan):
         try:
             mesh = calculate_workspace_surface(
                 self.solver,
                 scan_divisions=divisions,
+                full_scan=full_scan,
             )
             self.workspace_results.put(("ok", mesh))
         except Exception as error:
@@ -926,7 +1357,8 @@ class DeltaControlApp:
         axis.set_ylabel("Y (mm)")
         axis.set_zlabel("Z (mm)")
         axis.set_title(
-            f"The tich workspace lien thong tu HOME - luoi {mesh.grid_step_mm:.0f} mm"
+            f"Workspace: quet {mesh.scan_voxel_count:,}/"
+            f"{mesh.volume_voxel_count:,} voxel - luoi {mesh.grid_step_mm * 2.0:.0f} mm"
         )
         axis.set_box_aspect((1.0, 1.0, 0.55))
         axis.view_init(elev=24, azim=-55)
@@ -953,12 +1385,21 @@ class DeltaControlApp:
         canvas.get_tk_widget().pack(fill="both", expand=True)
 
         try:
-            duration = self._execute_workspace_scan(mesh.scan_path)
+            duration = self._execute_workspace_scan(
+                mesh.scan_path,
+                mesh.grid_step_mm * 2.0 / 1000.0,
+            )
         except (ValueError, DeltaIKError) as error:
             self._workspace_failed(str(error))
             return
 
-        self.status.set(f"Dang quet workspace trong {duration:.1f} s")
+        if duration >= 120.0:
+            duration_text = f"{duration / 60.0:.1f} phut"
+        else:
+            duration_text = f"{duration:.1f} s"
+        self.status.set(
+            f"Dang quet {mesh.scan_voxel_count:,} voxel trong {duration_text}"
+        )
         self.root.after(
             max(1, int(duration * 1000.0)),
             self._workspace_finished,
@@ -969,7 +1410,7 @@ class DeltaControlApp:
         self.workspace_button.state(["!disabled"])
         self.status.set("Da quet xong workspace va ve HOME")
 
-    def _execute_workspace_scan(self, scan_path):
+    def _execute_workspace_scan(self, scan_path, scan_grid_step):
         start = self._current_point()
         actual_q = self.node.feedback_theta
         home = tuple(float(v) for v in scan_path[0])
@@ -978,7 +1419,7 @@ class DeltaControlApp:
             p1=home,
             duration=3.0,
             n_waypoints=61,
-            preferred_start=actual_q,
+            preferred_start=actual_q[:3] if actual_q is not None else None,
         )
         if actual_q is not None:
             offsets = tuple(
@@ -996,69 +1437,35 @@ class DeltaControlApp:
         samples[-1]["q"] = (0.0, 0.0, 0.0)
         time_value = samples[-1]["t"]
         previous_p = home
-        previous_q = samples[-1]["q"]
         speed = 0.06
-        max_spacing = 0.002
+        max_spacing = max(0.002, float(scan_grid_step))
+        trajectory_path = compress_collinear_path(scan_path)
 
-        for endpoint in scan_path[1:]:
+        endpoint_count = len(trajectory_path) - 1
+        for endpoint_index, endpoint in enumerate(trajectory_path[1:]):
             endpoint = tuple(float(v) for v in endpoint)
             distance = math.dist(previous_p, endpoint)
-            segment_count = max(1, int(math.ceil(distance / max_spacing)))
             segment_time = max(distance / speed, 0.05)
-            segment_p_dot = tuple(
-                (endpoint[i] - previous_p[i]) / segment_time
-                for i in range(3)
+            if endpoint_index in (0, endpoint_count - 1):
+                segment_time = max(segment_time, 0.5)
+            segment_count = max(
+                5,
+                int(math.ceil(distance / max_spacing - 1e-9)) + 1,
             )
-
-            for step_index in range(1, segment_count + 1):
-                ratio = step_index / segment_count
-                p = tuple(
-                    previous_p[i] + ratio * (endpoint[i] - previous_p[i])
-                    for i in range(3)
-                )
-                q = self.solver.inverse_kinematics(
-                    *p,
-                    preferred=previous_q,
-                )
-                time_value += segment_time / segment_count
-                samples.append(
-                    {
-                        "index": len(samples),
-                        "t": time_value,
-                        "tau": 0.0,
-                        "p": p,
-                        "p_dot": segment_p_dot,
-                        "p_ddot": (0.0, 0.0, 0.0),
-                        "q": q,
-                        "q_dot": (0.0, 0.0, 0.0),
-                        "q_ddot": (0.0, 0.0, 0.0),
-                    }
-                )
-                previous_q = q
+            segment = generate_limited_joint_segment(
+                self.solver,
+                p0=previous_p,
+                p1=endpoint,
+                duration=segment_time,
+                n_waypoints=segment_count,
+            )
+            for point in segment[1:]:
+                point = dict(point)
+                point["index"] = len(samples)
+                point["t"] += time_value
+                samples.append(point)
+            time_value = samples[-1]["t"]
             previous_p = endpoint
-
-        for index, sample in enumerate(samples):
-            left = max(0, index - 1)
-            right = min(len(samples) - 1, index + 1)
-            dt = samples[right]["t"] - samples[left]["t"]
-            if dt > 1e-9:
-                sample["q_dot"] = tuple(
-                    (samples[right]["q"][i] - samples[left]["q"][i]) / dt
-                    for i in range(3)
-                )
-        for index, sample in enumerate(samples):
-            left = max(0, index - 1)
-            right = min(len(samples) - 1, index + 1)
-            dt = samples[right]["t"] - samples[left]["t"]
-            if dt > 1e-9:
-                sample["q_ddot"] = tuple(
-                    (
-                        samples[right]["q_dot"][i]
-                        - samples[left]["q_dot"][i]
-                    )
-                    / dt
-                    for i in range(3)
-                )
 
         samples[0]["q_dot"] = (0.0, 0.0, 0.0)
         samples[0]["q_ddot"] = (0.0, 0.0, 0.0)
@@ -1071,7 +1478,7 @@ class DeltaControlApp:
         return time_value
 
     def _export_csv(self):
-        if not self.last_samples:
+        if not self.last_samples and not self.monitor_records:
             messagebox.showwarning("Chua co du lieu", "Hay lap quy dao truoc.")
             return
         output_dir = Path.home() / "Downloads"
@@ -1079,25 +1486,92 @@ class DeltaControlApp:
         path = output_dir / f"delta_trajectory_{datetime.now():%Y%m%d_%H%M%S}.csv"
         with path.open("w", newline="", encoding="utf-8") as stream:
             writer = csv.writer(stream)
-            writer.writerow(
-                ["index", "t", "x", "y", "z", "q1", "q2", "q3", "qd1", "qd2", "qd3"]
-            )
-            for sample in self.last_samples:
+            if self.monitor_records:
                 writer.writerow(
                     [
-                        sample["index"],
-                        sample["t"],
-                        *sample["p"],
-                        *sample["q"],
-                        *sample["q_dot"],
+                        "sim_time",
+                        "trajectory_time",
+                        "x_ref",
+                        "y_ref",
+                        "z_ref",
+                        "x_actual",
+                        "y_actual",
+                        "z_actual",
+                        "q1_ref",
+                        "q2_ref",
+                        "q3_ref",
+                        "q1_actual",
+                        "q2_actual",
+                        "q3_actual",
+                        "qd1_ref",
+                        "qd2_ref",
+                        "qd3_ref",
+                        "qd1_actual",
+                        "qd2_actual",
+                        "qd3_actual",
+                        "error_qd1_rad_s",
+                        "error_qd2_rad_s",
+                        "error_qd3_rad_s",
+                        "error_qd_joint",
+                        "error_qd_max_rad_s",
+                        "error_xyz",
                     ]
                 )
+                for record in self.monitor_records:
+                    writer.writerow(
+                        [
+                            record["sim_time"],
+                            record["trajectory_time"],
+                            *record["p_ref"],
+                            *record["p_actual"],
+                            *record["q_ref"],
+                            *record["q_actual"],
+                            *record["qd_ref"],
+                            *record["qd_actual"],
+                            *[
+                                abs(
+                                    record["qd_actual"][i]
+                                    - record["qd_ref"][i]
+                                )
+                                for i in range(3)
+                            ],
+                            record["error_qd_joint"],
+                            record["error_qd"],
+                            record["error_xyz"],
+                        ]
+                    )
+            else:
+                writer.writerow(
+                    [
+                        "index",
+                        "t",
+                        "x",
+                        "y",
+                        "z",
+                        "q1",
+                        "q2",
+                        "q3",
+                        "qd1",
+                        "qd2",
+                        "qd3",
+                    ]
+                )
+                for sample in self.last_samples:
+                    writer.writerow(
+                        [
+                            sample["index"],
+                            sample["t"],
+                            *sample["p"],
+                            *sample["q"],
+                            *sample["q_dot"],
+                        ]
+                    )
         self.status.set(f"Da xuat CSV: {path}")
 
     def _spin_ros(self):
         if rclpy.ok():
             rclpy.spin_once(self.node, timeout_sec=0.0)
-            self.root.after(20, self._spin_ros)
+            self.root.after(5, self._spin_ros)
 
     def _refresh_feedback(self):
         xyz = self.node.feedback_xyz
@@ -1118,7 +1592,15 @@ class DeltaControlApp:
                     f"{math.degrees(v):.2f}"
                     for v in self.node.feedback_theta_speed
                 )
-                text += f" | q: {q_text} deg | qd: {qd_text} deg/s"
+                text += (
+                    f" | q1-3, Rz411111: {q_text} deg"
+                    f" | qd: {qd_text} deg/s"
+                )
+                if self.node.feedback_motor4_joint is not None:
+                    text += (
+                        f" | joint4: "
+                        f"{math.degrees(self.node.feedback_motor4_joint):.2f} deg"
+                    )
 
             self.feedback.set(text)
 

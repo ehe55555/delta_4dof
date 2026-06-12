@@ -28,6 +28,7 @@ setup(
     entry_points={
         "console_scripts": [
             "delta_gui = delta_control.gui:main",
+            "workspace_benchmark = delta_control.workspace_benchmark:main",
         ],
     },
 )
